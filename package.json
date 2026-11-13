@@ -1,19 +1,33 @@
 {
   "name": "low-game",
+  "type": "module",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "scripts": {
     "dev": "vite",
     "check": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build"
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix --max-warnings=0",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "build": "tsc --noEmit && vite build",
+    "test:escrow": "node --experimental-strip-types scripts/test-escrow.ts",
+    "dev:escrow": "node --experimental-strip-types scripts/deploy-escrow.ts",
+    "dev:base-faucet": "node --env-file-if-exists=.env.base-faucet --experimental-strip-types scripts/serve-base-faucet.ts"
+  },
+  "dependencies": {
+    "mqtt": "^5.16.1",
+    "viem": "^2.57.19"
   },
   "devDependencies": {
+    "@antfu/eslint-config": "6.7.3",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "ganache": "^7.9.2",
+    "prettier": "3.10.1",
+    "solc": "^0.8.38",
     "typescript": "^5.9.3",
     "vite": "^8.3.8",
     "vite-plugin-singlefile": "^2.3.4"
-  },
-  "dependencies": {
-    "mqtt": "^5.16.1"
   }
 }

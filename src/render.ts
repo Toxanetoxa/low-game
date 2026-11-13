@@ -1,11 +1,5 @@
-import {
-  ATTACK_ACTIVE_TICK,
-  FLOOR_Y,
-  STAGE_HEIGHT,
-  STAGE_WIDTH,
-  type FighterState,
-  type GameState,
-} from './combat';
+import type { FighterState, GameState } from './combat';
+import { ATTACK_ACTIVE_TICK, FLOOR_Y, STAGE_HEIGHT, STAGE_WIDTH } from './combat';
 
 const rust = {
   glow: '#ff6d4f',
@@ -30,11 +24,7 @@ const volt = {
 type Palette = typeof rust;
 type Point = readonly [number, number];
 
-function paint(
-  ctx: CanvasRenderingContext2D,
-  color: string,
-  points: readonly Point[],
-): void {
+function paint(ctx: CanvasRenderingContext2D, color: string, points: readonly Point[]): void {
   ctx.fillStyle = color;
   ctx.beginPath();
   points.forEach(([x, y], index) => {
@@ -60,9 +50,7 @@ function drawCity(ctx: CanvasRenderingContext2D, near: boolean): void {
     const top = base - height;
     const tint = random();
 
-    ctx.fillStyle = near
-      ? (tint > 0.5 ? '#111722' : '#161c28')
-      : (tint > 0.5 ? '#26253a' : '#302838');
+    ctx.fillStyle = near ? (tint > 0.5 ? '#111722' : '#161c28') : tint > 0.5 ? '#26253a' : '#302838';
     ctx.fillRect(x, top, width, height);
     ctx.fillRect(x + 5, top - 6, width - 11, 6);
     if (random() > 0.72) {
@@ -74,9 +62,7 @@ function drawCity(ctx: CanvasRenderingContext2D, near: boolean): void {
       for (let col = x + 6; col < x + width - 5; col += 8) {
         const light = random();
         if (light < 0.4) continue;
-        ctx.fillStyle = near
-          ? (light > 0.92 ? '#435d64' : '#242c3a')
-          : (light > 0.88 ? '#6c4f64' : '#3d3145');
+        ctx.fillStyle = near ? (light > 0.92 ? '#435d64' : '#242c3a') : light > 0.88 ? '#6c4f64' : '#3d3145';
         ctx.fillRect(col, row, near ? 3 : 2, light > 0.9 ? 3 : 2);
       }
     }
@@ -114,7 +100,16 @@ function drawBackdrop(ctx: CanvasRenderingContext2D): void {
   }
 
   ctx.fillStyle = '#bda9b660';
-  for (const [x, y] of [[110, 57], [197, 95], [252, 44], [309, 124], [648, 54], [751, 91], [842, 42], [890, 108]]) {
+  for (const [x, y] of [
+    [110, 57],
+    [197, 95],
+    [252, 44],
+    [309, 124],
+    [648, 54],
+    [751, 91],
+    [842, 42],
+    [890, 108],
+  ]) {
     ctx.fillRect(x, y, 2, 2);
   }
 
@@ -168,12 +163,7 @@ function drawBackdrop(ctx: CanvasRenderingContext2D): void {
   for (let y = 0; y < STAGE_HEIGHT; y += 4) ctx.fillRect(0, y, STAGE_WIDTH, 1);
 }
 
-function drawFighter(
-  ctx: CanvasRenderingContext2D,
-  fighter: FighterState,
-  palette: Palette,
-  time: number,
-): void {
+function drawFighter(ctx: CanvasRenderingContext2D, fighter: FighterState, palette: Palette, time: number): void {
   const outline = '#0a0e18';
   const height = FLOOR_Y - fighter.y;
   const shadowSize = Math.max(0.42, 1 - height / 150);
@@ -185,7 +175,7 @@ function drawFighter(
   ctx.beginPath();
   ctx.ellipse(0, 0, 45, 10, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = palette.glow + '30';
+  ctx.fillStyle = `${palette.glow}30`;
   ctx.fillRect(-26, 0, 52, 2);
   ctx.restore();
 
@@ -201,25 +191,130 @@ function drawFighter(
 
   ctx.save();
   ctx.translate(-stride, fighter.grounded ? 0 : -2);
-  paint(ctx, outline, [[-10,-15],[-2,-15],[1,-9],[-4,-2],[-2,-1],[-2,1],[-13,1],[-13,-4],[-9,-9]]);
-  paint(ctx, palette.shadow, [[-9,-13],[-3,-13],[-2,-9],[-7,-3],[-4,-2],[-4,0],[-12,0],[-12,-3],[-8,-9]]);
-  paint(ctx, palette.dark, [[-9,-11],[-5,-12],[-5,-9],[-9,-5],[-11,-5],[-11,-7]]);
+  paint(ctx, outline, [
+    [-10, -15],
+    [-2, -15],
+    [1, -9],
+    [-4, -2],
+    [-2, -1],
+    [-2, 1],
+    [-13, 1],
+    [-13, -4],
+    [-9, -9],
+  ]);
+  paint(ctx, palette.shadow, [
+    [-9, -13],
+    [-3, -13],
+    [-2, -9],
+    [-7, -3],
+    [-4, -2],
+    [-4, 0],
+    [-12, 0],
+    [-12, -3],
+    [-8, -9],
+  ]);
+  paint(ctx, palette.dark, [
+    [-9, -11],
+    [-5, -12],
+    [-5, -9],
+    [-9, -5],
+    [-11, -5],
+    [-11, -7],
+  ]);
   ctx.restore();
 
   ctx.save();
   ctx.translate(stride, fighter.grounded ? 0 : -3);
-  paint(ctx, outline, [[0,-15],[7,-15],[11,-8],[10,-4],[14,-3],[14,1],[4,1],[3,-2],[5,-8],[0,-9]]);
-  paint(ctx, palette.armor, [[0,-14],[6,-14],[9,-8],[8,-4],[12,-2],[12,0],[5,0],[4,-2],[6,-8],[1,-10]]);
-  paint(ctx, palette.dark, [[2,-12],[6,-12],[8,-8],[7,-6],[5,-6],[6,-8],[4,-9],[2,-9]]);
-  paint(ctx, palette.middle, [[6,-4],[8,-4],[12,-2],[12,-1],[6,-1]]);
+  paint(ctx, outline, [
+    [0, -15],
+    [7, -15],
+    [11, -8],
+    [10, -4],
+    [14, -3],
+    [14, 1],
+    [4, 1],
+    [3, -2],
+    [5, -8],
+    [0, -9],
+  ]);
+  paint(ctx, palette.armor, [
+    [0, -14],
+    [6, -14],
+    [9, -8],
+    [8, -4],
+    [12, -2],
+    [12, 0],
+    [5, 0],
+    [4, -2],
+    [6, -8],
+    [1, -10],
+  ]);
+  paint(ctx, palette.dark, [
+    [2, -12],
+    [6, -12],
+    [8, -8],
+    [7, -6],
+    [5, -6],
+    [6, -8],
+    [4, -9],
+    [2, -9],
+  ]);
+  paint(ctx, palette.middle, [
+    [6, -4],
+    [8, -4],
+    [12, -2],
+    [12, -1],
+    [6, -1],
+  ]);
   ctx.restore();
 
   ctx.translate(hurt ? -2 : 0, breath);
-  paint(ctx, outline, [[-11,-28],[1,-30],[8,-26],[9,-20],[6,-13],[-5,-12],[-12,-15],[-13,-24]]);
-  paint(ctx, palette.shadow, [[-10,-27],[1,-29],[6,-25],[7,-20],[5,-14],[-5,-13],[-10,-15],[-11,-23]]);
-  paint(ctx, palette.armor, [[-9,-25],[0,-27],[6,-24],[6,-20],[2,-16],[-6,-16],[-9,-20]]);
-  paint(ctx, palette.middle, [[-8,-25],[-5,-27],[1,-27],[5,-24],[4,-22],[-1,-22],[-4,-20],[-8,-21]]);
-  paint(ctx, palette.dark, [[-8,-22],[-4,-21],[-5,-18],[-7,-18],[-9,-20]]);
+  paint(ctx, outline, [
+    [-11, -28],
+    [1, -30],
+    [8, -26],
+    [9, -20],
+    [6, -13],
+    [-5, -12],
+    [-12, -15],
+    [-13, -24],
+  ]);
+  paint(ctx, palette.shadow, [
+    [-10, -27],
+    [1, -29],
+    [6, -25],
+    [7, -20],
+    [5, -14],
+    [-5, -13],
+    [-10, -15],
+    [-11, -23],
+  ]);
+  paint(ctx, palette.armor, [
+    [-9, -25],
+    [0, -27],
+    [6, -24],
+    [6, -20],
+    [2, -16],
+    [-6, -16],
+    [-9, -20],
+  ]);
+  paint(ctx, palette.middle, [
+    [-8, -25],
+    [-5, -27],
+    [1, -27],
+    [5, -24],
+    [4, -22],
+    [-1, -22],
+    [-4, -20],
+    [-8, -21],
+  ]);
+  paint(ctx, palette.dark, [
+    [-8, -22],
+    [-4, -21],
+    [-5, -18],
+    [-7, -18],
+    [-9, -20],
+  ]);
   ctx.fillStyle = bodyLight;
   ctx.fillRect(-5, -26, 6, 1);
   ctx.fillStyle = palette.visor;
@@ -227,10 +322,43 @@ function drawFighter(
   ctx.fillStyle = palette.middle;
   ctx.fillRect(-6, -15, 10, 1);
 
-  paint(ctx, outline, [[-5,-34],[0,-36],[7,-36],[10,-32],[10,-27],[7,-24],[0,-24],[-5,-27]]);
-  paint(ctx, palette.dark, [[-4,-33],[0,-35],[6,-35],[9,-32],[9,-27],[6,-25],[0,-25],[-4,-27]]);
-  paint(ctx, palette.middle, [[-3,-33],[1,-35],[6,-35],[9,-32],[9,-30],[0,-30],[-3,-28]]);
-  paint(ctx, bodyLight, [[0,-34],[6,-34],[8,-32],[4,-32],[3,-33],[0,-33]]);
+  paint(ctx, outline, [
+    [-5, -34],
+    [0, -36],
+    [7, -36],
+    [10, -32],
+    [10, -27],
+    [7, -24],
+    [0, -24],
+    [-5, -27],
+  ]);
+  paint(ctx, palette.dark, [
+    [-4, -33],
+    [0, -35],
+    [6, -35],
+    [9, -32],
+    [9, -27],
+    [6, -25],
+    [0, -25],
+    [-4, -27],
+  ]);
+  paint(ctx, palette.middle, [
+    [-3, -33],
+    [1, -35],
+    [6, -35],
+    [9, -32],
+    [9, -30],
+    [0, -30],
+    [-3, -28],
+  ]);
+  paint(ctx, bodyLight, [
+    [0, -34],
+    [6, -34],
+    [8, -32],
+    [4, -32],
+    [3, -33],
+    [0, -33],
+  ]);
   ctx.fillStyle = palette.shadow;
   ctx.fillRect(1, -30, 8, 3);
   ctx.fillStyle = palette.visor;
@@ -239,20 +367,105 @@ function drawFighter(
   ctx.fillRect(4, -26, 3, 1);
 
   if (punching) {
-    paint(ctx, outline, [[-9,-25],[0,-27],[8,-25],[12,-26],[19,-26],[23,-24],[23,-19],[20,-17],[12,-18],[7,-20],[0,-20],[-5,-18],[-10,-20]]);
-    paint(ctx, palette.armor, [[-9,-24],[0,-26],[8,-24],[13,-25],[19,-25],[22,-23],[22,-20],[19,-18],[13,-19],[7,-21],[0,-21],[-5,-19],[-9,-20]]);
-    paint(ctx, palette.middle, [[-8,-23],[-5,-25],[-1,-25],[3,-23],[0,-21],[-5,-20],[-8,-21]]);
-    paint(ctx, palette.middle, [[14,-24],[19,-25],[22,-23],[22,-20],[20,-19],[15,-20],[13,-22]]);
+    paint(ctx, outline, [
+      [-9, -25],
+      [0, -27],
+      [8, -25],
+      [12, -26],
+      [19, -26],
+      [23, -24],
+      [23, -19],
+      [20, -17],
+      [12, -18],
+      [7, -20],
+      [0, -20],
+      [-5, -18],
+      [-10, -20],
+    ]);
+    paint(ctx, palette.armor, [
+      [-9, -24],
+      [0, -26],
+      [8, -24],
+      [13, -25],
+      [19, -25],
+      [22, -23],
+      [22, -20],
+      [19, -18],
+      [13, -19],
+      [7, -21],
+      [0, -21],
+      [-5, -19],
+      [-9, -20],
+    ]);
+    paint(ctx, palette.middle, [
+      [-8, -23],
+      [-5, -25],
+      [-1, -25],
+      [3, -23],
+      [0, -21],
+      [-5, -20],
+      [-8, -21],
+    ]);
+    paint(ctx, palette.middle, [
+      [14, -24],
+      [19, -25],
+      [22, -23],
+      [22, -20],
+      [20, -19],
+      [15, -20],
+      [13, -22],
+    ]);
     ctx.fillStyle = bodyLight;
     ctx.fillRect(16, -24, 4, 1);
     ctx.fillRect(23, -27, 7, 1);
     ctx.fillRect(25, -18, 4, 1);
   } else {
     const guard = fighter.blocking ? -6 : 0;
-    paint(ctx, outline, [[-10,-25],[-3,-26],[0,-22],[4,-21],[8,-23 + guard],[13,-22 + guard],[15,-18 + guard],[12,-14 + guard],[7,-14 + guard],[4,-15],[-4,-15],[-9,-18]]);
-    paint(ctx, palette.armor, [[-9,-24],[-3,-25],[-1,-22],[4,-20],[8,-22 + guard],[12,-21 + guard],[14,-18 + guard],[11,-15 + guard],[7,-15 + guard],[4,-16],[-4,-16],[-8,-19]]);
-    paint(ctx, palette.middle, [[-9,-23],[-7,-25],[-3,-25],[-1,-22],[-4,-19],[-8,-20]]);
-    paint(ctx, palette.middle, [[7,-20 + guard],[9,-22 + guard],[12,-21 + guard],[14,-18 + guard],[11,-16 + guard],[8,-16 + guard],[6,-18 + guard]]);
+    paint(ctx, outline, [
+      [-10, -25],
+      [-3, -26],
+      [0, -22],
+      [4, -21],
+      [8, -23 + guard],
+      [13, -22 + guard],
+      [15, -18 + guard],
+      [12, -14 + guard],
+      [7, -14 + guard],
+      [4, -15],
+      [-4, -15],
+      [-9, -18],
+    ]);
+    paint(ctx, palette.armor, [
+      [-9, -24],
+      [-3, -25],
+      [-1, -22],
+      [4, -20],
+      [8, -22 + guard],
+      [12, -21 + guard],
+      [14, -18 + guard],
+      [11, -15 + guard],
+      [7, -15 + guard],
+      [4, -16],
+      [-4, -16],
+      [-8, -19],
+    ]);
+    paint(ctx, palette.middle, [
+      [-9, -23],
+      [-7, -25],
+      [-3, -25],
+      [-1, -22],
+      [-4, -19],
+      [-8, -20],
+    ]);
+    paint(ctx, palette.middle, [
+      [7, -20 + guard],
+      [9, -22 + guard],
+      [12, -21 + guard],
+      [14, -18 + guard],
+      [11, -16 + guard],
+      [8, -16 + guard],
+      [6, -18 + guard],
+    ]);
     ctx.fillStyle = bodyLight;
     ctx.fillRect(-7, -24, 4, 1);
     ctx.fillRect(9, -21 + guard, 3, 1);

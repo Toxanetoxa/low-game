@@ -25,8 +25,12 @@ const confirmationMs = 300;
 const brokerAckMs = 1_800;
 
 function key(name: string): string {
-  return name.normalize('NFKC').toLowerCase()
-    .replace(/\p{Default_Ignorable_Code_Point}/gu, '').trim().replace(/\s+/gu, ' ');
+  return name
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .trim()
+    .replace(/\s+/gu, ' ');
 }
 
 function readNickname(value: unknown): string | null {
@@ -36,13 +40,21 @@ function readNickname(value: unknown): string | null {
 export function isRoomIdentity(value: unknown): value is RoomIdentity {
   if (typeof value !== 'object' || value === null) return false;
   const identity = value as { id?: unknown; key?: unknown };
-  return typeof identity.id === 'string' && identityIdPattern.test(identity.id)
-    && typeof identity.key === 'string' && publicKeyPattern.test(identity.key);
+  return (
+    typeof identity.id === 'string' &&
+    identityIdPattern.test(identity.id) &&
+    typeof identity.key === 'string' &&
+    publicKeyPattern.test(identity.key)
+  );
 }
 
 function samePlayer(a: OnlinePlayer | undefined, b: OnlinePlayer | undefined): boolean {
-  return a?.nickname === b?.nickname && a?.available === b?.available
-    && a?.identity.id === b?.identity.id && a?.identity.key === b?.identity.key;
+  return (
+    a?.nickname === b?.nickname &&
+    a?.available === b?.available &&
+    a?.identity.id === b?.identity.id &&
+    a?.identity.key === b?.identity.key
+  );
 }
 
 function delay(ms: number): Promise<void> {
@@ -89,7 +101,7 @@ export class NicknamePresence {
     this.identity = identity;
     const connection = this.connection;
     client.on('message', this.receive);
-    const grants = await client.subscribeAsync(prefix + '+', { qos: 1 });
+    const grants = await client.subscribeAsync(`${prefix}+`, { qos: 1 });
     if (grants.length !== 1 || grants[0].qos > 2) throw new Error('Не удалось получить список онлайн-игроков.');
 
     // MQTT acknowledges the subscription before its retained records arrive.
@@ -245,9 +257,13 @@ export class NicknamePresence {
       }
     }
 
-    const players = Array.from(byName.values(), ({ player }) => player)
-      .sort((a, b) => a.nickname.localeCompare(b.nickname) || a.identity.id.localeCompare(b.identity.id));
-    if (players.length === this.players.length && players.every((player, index) => samePlayer(player, this.players[index]))) {
+    const players = Array.from(byName.values(), ({ player }) => player).sort(
+      (a, b) => a.nickname.localeCompare(b.nickname) || a.identity.id.localeCompare(b.identity.id),
+    );
+    if (
+      players.length === this.players.length &&
+      players.every((player, index) => samePlayer(player, this.players[index]))
+    ) {
       return;
     }
     this.players = players;
@@ -276,9 +292,10 @@ export class NicknamePresence {
       return Promise.reject(new Error('Соединение с лобби потеряно.'));
     }
     const committed = presence.previous ?? presence.active;
-    const profile = committed && committed === this.active && this.identity
-      ? { identity: this.identity, available: this.available }
-      : undefined;
+    const profile =
+      committed && committed === this.active && this.identity
+        ? { identity: this.identity, available: this.available }
+        : undefined;
     const payload = presence.active || presence.candidate ? JSON.stringify({ ...presence, profile }) : '';
     return new Promise((resolve, reject) => {
       let messageId: number | undefined;
@@ -286,20 +303,31 @@ export class NicknamePresence {
         if (messageId) client.removeOutgoingMessage(messageId);
         reject(new Error('Сервис лобби не подтвердил никнейм.'));
       }, brokerAckMs);
-      client.publish(this.topic, payload, {
-        qos: 1,
-        retain: true,
-        properties: { messageExpiryInterval: leaseSeconds },
-        cbStorePut: () => { messageId = client.getLastMessageId(); },
-      }, (error) => {
-        window.clearTimeout(timer);
-        if (error) reject(error);
-        else resolve();
-      });
+      client.publish(
+        this.topic,
+        payload,
+        {
+          qos: 1,
+          retain: true,
+          properties: { messageExpiryInterval: leaseSeconds },
+          cbStorePut: () => {
+            messageId = client.getLastMessageId();
+          },
+        },
+        (error) => {
+          window.clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        },
+      );
     });
   }
 
-  private readonly receive = (topic: string, payload: { length: number; toString(): string }, packet: IPublishPacket): void => {
+  private readonly receive = (
+    topic: string,
+    payload: { length: number; toString: () => string },
+    packet: IPublishPacket,
+  ): void => {
     if (!topic.startsWith(prefix) || topic === this.topic || payload.length > 512) return;
     const owner = topic.slice(prefix.length);
     if (!ownerPattern.test(owner)) return;
@@ -327,8 +355,10 @@ export class NicknamePresence {
       const nickname = previous ?? active;
       const identity = slots.profile?.identity;
       const available = slots.profile?.available;
-      const player = nickname && isRoomIdentity(identity) && identity.id !== this.identity?.id
-        && typeof available === 'boolean' ? { nickname, identity, available } : undefined;
+      const player =
+        nickname && isRoomIdentity(identity) && identity.id !== this.identity?.id && typeof available === 'boolean'
+          ? { nickname, identity, available }
+          : undefined;
       this.records.set(owner, {
         active,
         candidate,

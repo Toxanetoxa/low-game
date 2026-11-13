@@ -1,28 +1,17 @@
-import {
-  Combat,
-  EMPTY_INPUT,
-  MAX_HEALTH,
-  TICK_RATE,
-  isGameState,
-  isInput,
-  type GameState,
-  type Input,
-} from './combat';
-import { createRoomId, PeerSession, readInviteRoomId, type PeerRole, type PeerState } from './peer';
-import {
-  RoomDirectory,
-  type DirectorySignal,
-  type DirectoryState,
-  type OnlinePlayer,
-  type PublicRoom,
-  type RoomIdentity,
-} from './directory';
-import { ArenaRenderer } from './render';
+import type { GameState, Input } from './combat';
+import type { DirectorySignal, DirectoryState, OnlinePlayer, PublicRoom, RoomIdentity } from './directory';
+import type { PeerRole, PeerState } from './peer';
+import type { Hex } from './stake-wallet';
+import { Combat, EMPTY_INPUT, isGameState, isInput, MAX_HEALTH, TICK_RATE } from './combat';
+import { RoomDirectory } from './directory';
 import { normalizeNickname } from './nickname';
+import { createRoomId, PeerSession, readInviteRoomId } from './peer';
+import { ArenaRenderer } from './render';
+import { Stakes } from './stakes';
 
 function element<T extends HTMLElement>(id: string): T {
   const item = document.getElementById(id);
-  if (!item) throw new Error('Элемент интерфейса отсутствует: ' + id);
+  if (!item) throw new Error(`Элемент интерфейса отсутствует: ${id}`);
   return item as T;
 }
 
@@ -97,8 +86,10 @@ const keyboardActions = {
   KeyF: 'attack',
 } as const;
 const keyCaps = new Map(
-  Array.from(document.querySelectorAll<HTMLElement>('#control-guide kbd[data-key-code]'),
-    (key) => [key.dataset.keyCode, key]),
+  Array.from(document.querySelectorAll<HTMLElement>('#control-guide kbd[data-key-code]'), (key) => [
+    key.dataset.keyCode,
+    key,
+  ]),
 );
 const keyFlashTimers = new Map<string, number>();
 
@@ -114,7 +105,14 @@ type Mode = 'idle' | PeerRole;
 type Scores = [number, number];
 type Admission = { identity: RoomIdentity; requestId: string };
 type PublicAttempt =
-  | { role: 'host'; roomId: string; nickname: string; listed: boolean; guest: Admission | null; awaitingAnswer: boolean }
+  | {
+      role: 'host';
+      roomId: string;
+      nickname: string;
+      listed: boolean;
+      guest: Admission | null;
+      awaitingAnswer: boolean;
+    }
   | { role: 'guest'; roomId: string; host: Admission };
 
 type Challenge = {
@@ -128,6 +126,7 @@ type Frame = {
   kind: 'frame';
   round: number;
   countdown: number;
+  stakeKey?: Hex;
   scores: Scores;
   game: GameState;
 };
@@ -160,6 +159,12 @@ const keys = new Set<string>();
 const touchActions = new Map<number, { action: keyof Input; button: HTMLButtonElement }>();
 let ownsMatchFullscreen = false;
 
+const stakes = new Stakes({
+  send: (packet) => peer?.send(packet) ?? false,
+  startRound: (key) => nextRound(key),
+  clearInput: clearLocalInputs,
+});
+
 type LockableOrientation = ScreenOrientation & { lock?: (orientation: 'landscape') => Promise<void> };
 
 function setText(node: HTMLElement, value: string): void {
@@ -183,6 +188,7 @@ function showNicknameScreen(name = nickname ?? '', focus = Boolean(nickname)): v
   ui.nicknameScreen.hidden = false;
   ui.header.hidden = true;
   ui.layout.hidden = true;
+  stakes.setLobbyVisible(false);
   directory?.setAvailable(false);
   if (focus) {
     ui.nicknameInput.focus();
@@ -197,6 +203,7 @@ function showGame(name: string): void {
   ui.nicknameScreen.hidden = true;
   ui.header.hidden = false;
   ui.layout.hidden = false;
+  stakes.setLobbyVisible(!ui.initial.hidden);
   directory?.setAvailable(true);
   renderPublicRooms();
   renderOnlinePlayers();
@@ -232,7 +239,7 @@ async function claimNickname(name: string): Promise<void> {
   const currentDirectory = directory;
   let result: 'claimed' | 'taken' | 'offline' = 'offline';
   try {
-    result = await currentDirectory?.claimNickname(name) ?? 'offline';
+    result = (await currentDirectory?.claimNickname(name)) ?? 'offline';
   } catch {
     // A failed check leaves the form open for retry.
   }
@@ -365,11 +372,11 @@ async function toggleMatchFullscreen(): Promise<void> {
   }
 }
 
-function nextRound(): void {
+function nextRound(stakeKey?: Hex): void {
   const scores = match?.scores ?? [0, 0];
   const round = (match?.round ?? 0) + 1;
   game.reset();
-  match = { kind: 'frame', game: game.state, scores, round, countdown: countdownTicks };
+  match = { kind: 'frame', game: game.state, scores, round, countdown: countdownTicks, stakeKey };
   matchDirty = true;
   rematchRequested = false;
   ui.rematch.disabled = false;
@@ -383,15 +390,17 @@ function startMatch(nextMode: PeerRole): void {
   document.body.dataset.mobileMatch = 'true';
   document.body.dataset.mobileFighter = fighter.toLowerCase();
   ui.touch.hidden = false;
-  ui.touch.setAttribute('aria-label', 'Управление ' + fighter);
-  setText(ui.mobileFighter, 'Вы — ' + fighter);
+  ui.touch.setAttribute('aria-label', `Управление ${fighter}`);
+  setText(ui.mobileFighter, `Вы — ${fighter}`);
   sentInput = '';
   if (nextMode === 'host') nextRound();
 }
 
 function canShareLink(): boolean {
-  return (location.protocol === 'https:' || location.protocol === 'http:')
-    && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  return (
+    (location.protocol === 'https:' || location.protocol === 'http:') &&
+    !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
+  );
 }
 
 function inviteFrom(text: string): string {
@@ -403,6 +412,7 @@ function inviteFrom(text: string): string {
 
 function setLobby(step: 'initial' | 'exchange' | 'public' | 'challenge' | 'connected'): void {
   ui.initial.hidden = step !== 'initial';
+  stakes.setLobbyVisible(step === 'initial' && !ui.layout.hidden);
   ui.exchange.hidden = step !== 'exchange';
   ui.publicWait.hidden = step !== 'public';
   ui.challenge.hidden = step !== 'challenge';
@@ -420,7 +430,10 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
   window.clearTimeout(publicTimer);
   const pendingChallenge = takeChallenge();
   if (pendingChallenge && notifyPeer) {
-    sendChallengeNotice(pendingChallenge, pendingChallenge.direction === 'incoming' ? 'challenge-decline' : 'challenge-cancel');
+    sendChallengeNotice(
+      pendingChallenge,
+      pendingChallenge.direction === 'incoming' ? 'challenge-decline' : 'challenge-cancel',
+    );
   }
   const attempt = publicAttempt;
   publicAttempt = null;
@@ -432,6 +445,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
   const closing = peer;
   peer = null;
   linkOpen = false;
+  stakes.disconnect();
   if (notifyPeer && closing?.send({ kind: 'leave' })) {
     window.setTimeout(() => closing.close(), 250);
   } else {
@@ -458,8 +472,9 @@ function peerState(session: PeerSession, state: PeerState): void {
     ui.roomId.textContent = session.roomId;
     setLobby('connected');
     connection('P2P · соединено', 'connected');
-    message('Ваш боец — ' + fighters[session.role === 'host' ? 0 : 1] + '.');
+    message(`Ваш боец — ${fighters[session.role === 'host' ? 0 : 1]}.`);
     if (mode !== session.role) startMatch(session.role);
+    if (session.roomId) stakes.connect(session.roomId, session.role);
     matchDirty = true;
     return;
   }
@@ -484,9 +499,13 @@ function peerState(session: PeerSession, state: PeerState): void {
       void reopenPublicRoom(publicAttempt, 'Прямое соединение с соперником недоступно.');
       return;
     }
-    closeRoom(publicAttempt
-      ? 'Прямое соединение недоступно. Попробуйте подключиться из одной сети.'
-      : 'Прямое соединение недоступно. Проверьте коды или попробуйте подключиться из одной сети.', true, true);
+    closeRoom(
+      publicAttempt
+        ? 'Прямое соединение недоступно. Попробуйте подключиться из одной сети.'
+        : 'Прямое соединение недоступно. Проверьте коды или попробуйте подключиться из одной сети.',
+      true,
+      true,
+    );
   } else if (state === 'closed' && (publicAttempt || mode === session.role || !ui.outgoing.disabled)) {
     closeRoom('Игрок покинул комнату.', true);
   }
@@ -497,11 +516,17 @@ function isScore(value: unknown): value is number {
 }
 
 function isFrame(value: Record<string, unknown>): value is Frame {
-  return value.kind === 'frame'
-    && isScore(value.round) && value.round > 0
-    && isScore(value.countdown) && value.countdown <= countdownTicks
-    && Array.isArray(value.scores) && value.scores.length === 2 && value.scores.every(isScore)
-    && isGameState(value.game);
+  return (
+    value.kind === 'frame' &&
+    isScore(value.round) &&
+    value.round > 0 &&
+    isScore(value.countdown) &&
+    value.countdown <= countdownTicks &&
+    Array.isArray(value.scores) &&
+    value.scores.length === 2 &&
+    value.scores.every(isScore) &&
+    isGameState(value.game)
+  );
 }
 
 function receive(session: PeerSession, data: unknown): void {
@@ -512,20 +537,29 @@ function receive(session: PeerSession, data: unknown): void {
     return;
   }
 
+  if (stakes.receive(packet)) return;
   if (session.role === 'host') {
     if (packet.kind === 'input' && isInput(packet.input)) {
       remoteJump ||= packet.input.jump && !remoteInput.jump;
       remoteAttack ||= packet.input.attack && !remoteInput.attack;
       remoteInput = packet.input;
-    } else if (packet.kind === 'rematch' && match && match.game.winner !== null && packet.round === match.round) {
+    } else if (
+      packet.kind === 'rematch' &&
+      match &&
+      match.game.winner !== null &&
+      packet.round === match.round &&
+      !stakes.hasMatch
+    ) {
       nextRound();
     }
   } else if (isFrame(packet) && (!match || packet.round >= match.round)) {
+    if (packet.stakeKey && !stakes.canPlay(packet.stakeKey)) return;
     if (packet.round !== match?.round) {
       rematchRequested = false;
       ui.rematch.disabled = false;
     }
     match = packet;
+    if (packet.stakeKey && packet.game.winner !== null) stakes.recordResult(packet.stakeKey, packet.game.winner);
   }
 }
 
@@ -534,10 +568,14 @@ function errorText(error: unknown): string {
 }
 
 function attachPeer(role: PeerRole, useStun: boolean): PeerSession {
-  const session = new PeerSession(role, {
-    onState: (state) => peerState(session, state),
-    onData: (data) => receive(session, data),
-  }, { useStun });
+  const session = new PeerSession(
+    role,
+    {
+      onState: (state) => peerState(session, state),
+      onData: (data) => receive(session, data),
+    },
+    { useStun },
+  );
   peer = session;
   return session;
 }
@@ -550,11 +588,15 @@ function renderPublicRooms(): void {
   const online = directoryState === 'online';
   const canPlay = online && directory?.hasNickname === true;
   ui.createPublic.disabled = !canPlay;
-  const unavailable = directoryState === 'unsupported'
-    ? 'Общее лобби доступно в браузере на HTTPS или при открытии HTML-файла.'
-    : 'Связь с общим лобби потеряна. Пробуем подключиться снова.';
-  const status = online ? 'Открытых комнат пока нет.'
-    : directoryState === 'connecting' ? 'Подключаемся к общему лобби…' : unavailable;
+  const unavailable =
+    directoryState === 'unsupported'
+      ? 'Общее лобби доступно в браузере на HTTPS или при открытии HTML-файла.'
+      : 'Связь с общим лобби потеряна. Пробуем подключиться снова.';
+  const status = online
+    ? 'Открытых комнат пока нет.'
+    : directoryState === 'connecting'
+      ? 'Подключаемся к общему лобби…'
+      : unavailable;
   setText(ui.publicStatus, status);
   ui.publicStatus.hidden = online && listedRooms.length > 0;
   ui.publicRooms.hidden = !online || listedRooms.length === 0;
@@ -569,11 +611,13 @@ function renderPublicRooms(): void {
     button.disabled = !canPlay;
     button.title = room.id;
     label.className = 'public-room-id';
-    label.textContent = room.nickname ?? 'Комната ' + room.id.slice(0, 8);
+    label.textContent = room.nickname ?? `Комната ${room.id.slice(0, 8)}`;
     action.className = 'public-room-action';
     action.textContent = 'Войти';
     button.append(label, action);
-    button.addEventListener('click', () => { void joinPublicRoom(room); });
+    button.addEventListener('click', () => {
+      void joinPublicRoom(room);
+    });
     item.append(button);
     return item;
   });
@@ -587,8 +631,11 @@ function canChallenge(): boolean {
 function renderOnlinePlayers(): void {
   const online = directoryState === 'online';
   const available = canChallenge();
-  const status = online ? 'Других игроков онлайн пока нет.'
-    : directoryState === 'connecting' ? 'Подключаемся к общему лобби…' : 'Список игроков временно недоступен.';
+  const status = online
+    ? 'Других игроков онлайн пока нет.'
+    : directoryState === 'connecting'
+      ? 'Подключаемся к общему лобби…'
+      : 'Список игроков временно недоступен.';
   setText(ui.onlineStatus, status);
   ui.onlineStatus.hidden = online && listedPlayers.length > 0;
   ui.onlinePlayers.hidden = !online || listedPlayers.length === 0;
@@ -605,9 +652,11 @@ function renderOnlinePlayers(): void {
       button.type = 'button';
       button.className = 'button button-secondary online-challenge';
       button.textContent = 'Вызвать';
-      button.setAttribute('aria-label', 'Вызвать ' + player.nickname + ' на бой');
+      button.setAttribute('aria-label', `Вызвать ${player.nickname} на бой`);
       button.disabled = !available;
-      button.addEventListener('click', () => { void sendChallenge(player); });
+      button.addEventListener('click', () => {
+        void sendChallenge(player);
+      });
       item.append(label, button);
     } else {
       const status = document.createElement('span');
@@ -633,16 +682,23 @@ function connectDirectory(): void {
       renderOnlinePlayers();
       if (state === 'offline' && challenge) closeRoom('Связь с общим лобби потеряна. Отправьте вызов ещё раз.', true);
       if (publicAttempt?.role === 'host' && publicAttempt.listed && !publicAttempt.guest) {
-        setText(ui.publicWaitMessage, state === 'online'
-          ? 'Комната видна в общем лобби.'
-          : 'Восстанавливаем связь с общим лобби…');
+        setText(
+          ui.publicWaitMessage,
+          state === 'online' ? 'Комната видна в общем лобби.' : 'Восстанавливаем связь с общим лобби…',
+        );
       }
     },
     onRooms(rooms) {
-      if (rooms.length === listedRooms.length && rooms.every((room, index) => {
-        const previous = listedRooms[index];
-        return room.id === previous.id && room.nickname === previous.nickname && sameIdentity(room.host, previous.host);
-      })) return;
+      if (
+        rooms.length === listedRooms.length &&
+        rooms.every((room, index) => {
+          const previous = listedRooms[index];
+          return (
+            room.id === previous.id && room.nickname === previous.nickname && sameIdentity(room.host, previous.host)
+          );
+        })
+      )
+        return;
       listedRooms = rooms;
       renderPublicRooms();
     },
@@ -651,8 +707,12 @@ function connectDirectory(): void {
       renderOnlinePlayers();
     },
     onSignal(sender, signal) {
-      if (signal.kind === 'challenge' || signal.kind === 'challenge-accept'
-        || signal.kind === 'challenge-decline' || signal.kind === 'challenge-cancel') {
+      if (
+        signal.kind === 'challenge' ||
+        signal.kind === 'challenge-accept' ||
+        signal.kind === 'challenge-decline' ||
+        signal.kind === 'challenge-cancel'
+      ) {
         void receiveChallenge(sender, { ...signal, kind: signal.kind });
       } else {
         void receivePublicSignal(sender, signal);
@@ -681,9 +741,10 @@ function showChallenge(next: Challenge): void {
   const incoming = next.direction === 'incoming';
   setLobby('challenge');
   setText(ui.challengeTitle, incoming ? 'Вызов на бой' : 'Вызов отправлен');
-  setText(ui.challengeMessage, incoming
-    ? next.player.nickname + ' вызывает вас на бой.'
-    : 'Ждём ответа от ' + next.player.nickname + '.');
+  setText(
+    ui.challengeMessage,
+    incoming ? `${next.player.nickname} вызывает вас на бой.` : `Ждём ответа от ${next.player.nickname}.`,
+  );
   ui.acceptChallenge.hidden = !incoming;
   ui.declineChallenge.hidden = !incoming;
   connection('Вызов на бой', 'pending');
@@ -701,9 +762,13 @@ function takeChallenge(): Challenge | null {
 }
 
 function sendChallengeNotice(pending: Challenge, kind: ChallengeKind): void {
-  void directory?.send(pending.player.identity, {
-    kind, roomId: pending.roomId, requestId: pending.requestId,
-  }).catch(() => {});
+  void directory
+    ?.send(pending.player.identity, {
+      kind,
+      roomId: pending.roomId,
+      requestId: pending.requestId,
+    })
+    .catch(() => {});
 }
 
 async function sendChallenge(player: OnlinePlayer): Promise<void> {
@@ -714,7 +779,10 @@ async function sendChallenge(player: OnlinePlayer): Promise<void> {
     return;
   }
   const next: Challenge = {
-    direction: 'outgoing', player, roomId: createRoomId(), requestId: createRoomId(),
+    direction: 'outgoing',
+    player,
+    roomId: createRoomId(),
+    requestId: createRoomId(),
   };
   showChallenge(next);
   try {
@@ -735,7 +803,8 @@ async function acceptChallenge(): Promise<void> {
 
   takeChallenge();
   const attempt: PublicAttempt = {
-    role: 'guest', roomId: incoming.roomId,
+    role: 'guest',
+    roomId: incoming.roomId,
     host: { identity: incoming.player.identity, requestId: incoming.requestId },
   };
   openPublicWait(attempt, 'Подключаемся', 'Устанавливаем прямое соединение…');
@@ -744,7 +813,9 @@ async function acceptChallenge(): Promise<void> {
   }, 42_000);
   try {
     await rooms.send(incoming.player.identity, {
-      kind: 'challenge-accept', roomId: incoming.roomId, requestId: incoming.requestId,
+      kind: 'challenge-accept',
+      roomId: incoming.roomId,
+      requestId: incoming.requestId,
     });
   } catch (error) {
     if (publicAttempt === attempt) closeRoom(errorText(error), true, true);
@@ -756,7 +827,7 @@ async function receiveChallenge(
   signal: { kind: ChallengeKind; roomId: string; requestId: string },
 ): Promise<void> {
   const current = challenge;
-  const challengeKey = sender.id + '/' + signal.roomId + '/' + signal.requestId;
+  const challengeKey = `${sender.id}/${signal.roomId}/${signal.requestId}`;
   const now = Date.now();
   for (const [id, expires] of cancelledChallenges) {
     if (expires <= now) cancelledChallenges.delete(id);
@@ -764,9 +835,13 @@ async function receiveChallenge(
   if (signal.kind === 'challenge-cancel') cancelledChallenges.set(challengeKey, now + challengeWaitMs);
   if (signal.kind === 'challenge') {
     if (cancelledChallenges.has(challengeKey)) return;
-    if (current?.direction === 'incoming'
-      && current.roomId === signal.roomId && current.requestId === signal.requestId
-      && sameIdentity(sender, current.player.identity)) return;
+    if (
+      current?.direction === 'incoming' &&
+      current.roomId === signal.roomId &&
+      current.requestId === signal.requestId &&
+      sameIdentity(sender, current.player.identity)
+    )
+      return;
 
     const player = listedPlayers.find((other) => sameIdentity(sender, other.identity));
     if (!player) {
@@ -788,12 +863,18 @@ async function receiveChallenge(
     return;
   }
 
-  if (!current || !sameIdentity(sender, current.player.identity)
-    || signal.roomId !== current.roomId || signal.requestId !== current.requestId) {
+  if (
+    !current ||
+    !sameIdentity(sender, current.player.identity) ||
+    signal.roomId !== current.roomId ||
+    signal.requestId !== current.requestId
+  ) {
     const attempt = publicAttempt;
     const opponent = attempt && opponentInRoom(attempt);
-    const sameAttempt = attempt?.roomId === signal.roomId && opponent?.requestId === signal.requestId
-      && sameIdentity(sender, opponent.identity);
+    const sameAttempt =
+      attempt?.roomId === signal.roomId &&
+      opponent?.requestId === signal.requestId &&
+      sameIdentity(sender, opponent.identity);
     if (signal.kind === 'challenge-cancel' && !linkOpen && attempt?.role === 'guest' && sameAttempt) {
       closeRoom('Соперник отменил вызов.');
     } else if (signal.kind === 'challenge-accept' && !sameAttempt) {
@@ -803,13 +884,18 @@ async function receiveChallenge(
   }
 
   if (signal.kind === 'challenge-decline' && current.direction === 'outgoing') {
-    closeRoom(current.player.nickname + ' не принял вызов.');
+    closeRoom(`${current.player.nickname} не принял вызов.`);
   } else if (signal.kind === 'challenge-cancel' && current.direction === 'incoming') {
     closeRoom('Соперник отменил вызов.');
   } else if (signal.kind === 'challenge-accept' && current.direction === 'outgoing' && nickname) {
     takeChallenge();
     const attempt: PublicAttempt = {
-      role: 'host', roomId: current.roomId, nickname, listed: false, guest: null, awaitingAnswer: false,
+      role: 'host',
+      roomId: current.roomId,
+      nickname,
+      listed: false,
+      guest: null,
+      awaitingAnswer: false,
     };
     openPublicWait(attempt, 'Вызов принят', 'Устанавливаем прямое соединение…');
     await admitPublicGuest(attempt, { identity: sender, requestId: signal.requestId });
@@ -819,7 +905,12 @@ async function receiveChallenge(
 async function createPublicRoom(): Promise<void> {
   if (!nickname || peer || publicAttempt || challenge || !directory?.hasNickname) return;
   const attempt: PublicAttempt = {
-    role: 'host', roomId: createRoomId(), nickname, listed: true, guest: null, awaitingAnswer: false,
+    role: 'host',
+    roomId: createRoomId(),
+    nickname,
+    listed: true,
+    guest: null,
+    awaitingAnswer: false,
   };
   openPublicWait(attempt, 'Ждём соперника', 'Публикуем комнату…');
   try {
@@ -850,8 +941,7 @@ async function joinPublicRoom(room: PublicRoom): Promise<void> {
 }
 
 function sendPublicNotice(admission: Admission, roomId: string, kind: 'reject' | 'cancel'): void {
-  void directory?.send(admission.identity, { kind, roomId, requestId: admission.requestId })
-    .catch(() => {});
+  void directory?.send(admission.identity, { kind, roomId, requestId: admission.requestId }).catch(() => {});
 }
 
 async function reopenPublicRoom(attempt: Extract<PublicAttempt, { role: 'host' }>, note: string): Promise<void> {
@@ -905,7 +995,10 @@ async function admitPublicGuest(
     if (publicAttempt !== attempt || attempt.guest !== admission || session !== peer) return;
     attempt.awaitingAnswer = true;
     await rooms.send(admission.identity, {
-      kind: 'invite', roomId: attempt.roomId, requestId: admission.requestId, code,
+      kind: 'invite',
+      roomId: attempt.roomId,
+      requestId: admission.requestId,
+      code,
     });
   } catch (error) {
     if (publicAttempt !== attempt || attempt.guest !== admission) return;
@@ -921,9 +1014,12 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
     const opponent = opponentInRoom(attempt);
     if (attempt.role === 'host' && signal.kind === 'request') {
       sendPublicNotice({ identity: sender, requestId: signal.requestId }, attempt.roomId, 'reject');
-    } else if (opponent && sameIdentity(sender, opponent.identity)
-      && signal.requestId === opponent.requestId
-      && signal.kind === (attempt.role === 'host' ? 'cancel' : 'reject')) {
+    } else if (
+      opponent &&
+      sameIdentity(sender, opponent.identity) &&
+      signal.requestId === opponent.requestId &&
+      signal.kind === (attempt.role === 'host' ? 'cancel' : 'reject')
+    ) {
       closeRoom('Игрок покинул комнату.');
     }
     return;
@@ -1001,9 +1097,10 @@ async function openRoom(role: PeerRole): Promise<void> {
     ui.copy.disabled = false;
     ui.copyLink.hidden = role !== 'host' || !canShareLink();
     ui.answerForm.hidden = role !== 'host';
-    ui.instructions.textContent = role === 'host'
-      ? 'Отправьте приглашение другу и вставьте его ответ.'
-      : 'Передайте этот код создателю комнаты. Игра начнётся после того, как он вставит ответ.';
+    ui.instructions.textContent =
+      role === 'host'
+        ? 'Отправьте приглашение другу и вставьте его ответ.'
+        : 'Передайте этот код создателю комнаты. Игра начнётся после того, как он вставит ответ.';
     connection(role === 'host' ? 'Ждём ответ' : 'Ждём игрока', 'pending');
   } catch (error) {
     if (!session) {
@@ -1082,10 +1179,13 @@ function flashKey(code: string): void {
 
   window.clearTimeout(keyFlashTimers.get(code));
   key.classList.add('is-pressed');
-  keyFlashTimers.set(code, window.setTimeout(() => {
-    key.classList.remove('is-pressed');
-    keyFlashTimers.delete(code);
-  }, 160));
+  keyFlashTimers.set(
+    code,
+    window.setTimeout(() => {
+      key.classList.remove('is-pressed');
+      keyFlashTimers.delete(code);
+    }, 160),
+  );
 }
 
 function pressKey(event: KeyboardEvent): void {
@@ -1094,7 +1194,7 @@ function pressKey(event: KeyboardEvent): void {
   if (target instanceof HTMLElement && (target.isContentEditable || target.closest('textarea, input, select'))) return;
 
   if (!event.repeat) flashKey(event.code);
-  if (!linkOpen) return;
+  if (!linkOpen || stakes.isOpen) return;
 
   event.preventDefault();
   keys.add(event.code);
@@ -1124,6 +1224,7 @@ function simulate(): void {
     remoteJump = false;
     remoteAttack = false;
     if (match.game.winner === 0 || match.game.winner === 1) match.scores[match.game.winner] += 1;
+    if (match.stakeKey && match.game.winner !== null) stakes.recordResult(match.stakeKey, match.game.winner);
     matchDirty = true;
   }
   snapshotTick += 1;
@@ -1136,7 +1237,7 @@ function updateScreen(): void {
   const state = match?.game ?? game.state;
   for (const index of [0, 1] as const) {
     const health = state.fighters[index].health;
-    const width = (health / MAX_HEALTH) * 100 + '%';
+    const width = `${(health / MAX_HEALTH) * 100}%`;
     if (ui.health[index].style.width !== width) ui.health[index].style.width = width;
     setText(ui.hp[index], String(health));
     setText(ui.score[index], String(match?.scores[index] ?? 0));
@@ -1155,11 +1256,16 @@ function updateScreen(): void {
   } else if (!match) {
     overlay('На арену', 'СЕТЕВОЙ МАТЧ', 'Ждём начала раунда.');
   } else if (match.countdown > 0) {
-    overlay(String(Math.ceil(match.countdown / TICK_RATE)), 'РАУНД ' + match.round, '');
+    overlay(String(Math.ceil(match.countdown / TICK_RATE)), `РАУНД ${match.round}`, '');
   } else if (state.winner !== null) {
-    const winner = state.winner === 'draw' ? 'Ничья' : fighters[state.winner] + ' победил';
+    const winner = state.winner === 'draw' ? 'Ничья' : `${fighters[state.winner]} победил`;
     const reason = seconds === 0 ? 'Время вышло' : 'Нокаут';
-    overlay(winner, 'РАУНД ' + match.round + ' ЗАВЕРШЁН', rematchRequested ? 'Ждём начала раунда…' : reason, true);
+    overlay(
+      winner,
+      `РАУНД ${match.round} ЗАВЕРШЁН`,
+      rematchRequested ? 'Ждём начала раунда…' : reason,
+      !stakes.hasMatch,
+    );
   } else {
     overlay('', '', '');
   }
@@ -1170,11 +1276,19 @@ ui.nicknameInput.addEventListener('input', () => setNicknameError(''));
 ui.editNickname.addEventListener('click', () => {
   if (!peer && !publicAttempt && !challenge) showNicknameScreen();
 });
-ui.cancelNickname.addEventListener('click', () => { if (nickname) showGame(nickname); });
-ui.acceptChallenge.addEventListener('click', () => { void acceptChallenge(); });
+ui.cancelNickname.addEventListener('click', () => {
+  if (nickname) showGame(nickname);
+});
+ui.acceptChallenge.addEventListener('click', () => {
+  void acceptChallenge();
+});
 ui.declineChallenge.addEventListener('click', () => closeRoom('Вызов отклонён.', false, true));
-ui.createPublic.addEventListener('click', () => { void createPublicRoom(); });
-ui.create.addEventListener('click', () => { void openRoom('host'); });
+ui.createPublic.addEventListener('click', () => {
+  void createPublicRoom();
+});
+ui.create.addEventListener('click', () => {
+  void openRoom('host');
+});
 ui.join.addEventListener('submit', (event) => {
   event.preventDefault();
   void openRoom('guest');
@@ -1183,16 +1297,22 @@ ui.answerForm.addEventListener('submit', (event) => {
   event.preventDefault();
   void acceptAnswer();
 });
-ui.copy.addEventListener('click', () => { void copyCode(false); });
-ui.copyLink.addEventListener('click', () => { void copyCode(true); });
+ui.copy.addEventListener('click', () => {
+  void copyCode(false);
+});
+ui.copyLink.addEventListener('click', () => {
+  void copyCode(true);
+});
 ui.leave.addEventListener('click', () => closeRoom('', false, true));
 ui.mobileLeave.addEventListener('click', () => closeRoom('', false, true));
-ui.mobileFullscreen.hidden = !document.fullscreenEnabled
-  || typeof document.documentElement.requestFullscreen !== 'function';
-ui.mobileFullscreen.addEventListener('click', () => { void toggleMatchFullscreen(); });
+ui.mobileFullscreen.hidden =
+  !document.fullscreenEnabled || typeof document.documentElement.requestFullscreen !== 'function';
+ui.mobileFullscreen.addEventListener('click', () => {
+  void toggleMatchFullscreen();
+});
 document.addEventListener('fullscreenchange', updateFullscreenButton);
 ui.rematch.addEventListener('click', () => {
-  if (!match || match.game.winner === null) return;
+  if (!match || match.game.winner === null || stakes.hasMatch) return;
   ui.rematch.blur();
   if (mode === 'host') {
     nextRound();
@@ -1203,7 +1323,9 @@ ui.rematch.addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', pressKey);
-document.addEventListener('keyup', (event) => { keys.delete(event.code); });
+document.addEventListener('keyup', (event) => {
+  keys.delete(event.code);
+});
 window.addEventListener('blur', clearLocalInputs);
 document.addEventListener('visibilitychange', clearLocalInputs);
 window.addEventListener('pagehide', () => {

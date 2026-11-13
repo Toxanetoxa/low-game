@@ -35,13 +35,7 @@ export function createRoomId(): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20),
-  ].join('-');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
 }
 
 function encodeSignal(signal: Signal): string {
@@ -64,7 +58,7 @@ function decodeSignal(code: string, expectedType: SignalType): Signal {
   }
 
   const payload = trimmed.slice(CODE_PREFIX.length);
-  if (!/^[A-Za-z0-9_-]+$/.test(payload)) throw new Error(invalidCode);
+  if (!/^[\w-]+$/.test(payload)) throw new Error(invalidCode);
 
   let signal: Partial<Signal> | null;
   try {
@@ -88,9 +82,7 @@ function decodeSignal(code: string, expectedType: SignalType): Signal {
   }
 
   if (signal.type !== expectedType) {
-    throw new Error(
-      expectedType === 'offer' ? 'Вставьте код приглашения.' : 'Вставьте ответ второго игрока.',
-    );
+    throw new Error(expectedType === 'offer' ? 'Вставьте код приглашения.' : 'Вставьте ответ второго игрока.');
   }
 
   return { type: signal.type, roomId: signal.roomId, sdp: signal.sdp };
@@ -146,7 +138,7 @@ export class PeerSession {
     { useStun = true }: PeerOptions = {},
   ) {
     if (typeof RTCPeerConnection === 'undefined') {
-      throw new Error('В этом браузере WebRTC недоступен. Откройте игру в другом браузере.');
+      throw new TypeError('В этом браузере WebRTC недоступен. Откройте игру в другом браузере.');
     }
 
     this.connection = new RTCPeerConnection({
@@ -178,7 +170,7 @@ export class PeerSession {
     } catch (error) {
       this.dispose();
       if (error instanceof DOMException) {
-        throw new Error('Не удалось создать приглашение. Попробуйте ещё раз.', { cause: error });
+        throw new TypeError('Не удалось создать приглашение. Попробуйте ещё раз.', { cause: error });
       }
       throw error;
     } finally {
@@ -200,7 +192,7 @@ export class PeerSession {
     } catch (error) {
       this.dispose();
       if (error instanceof DOMException) {
-        throw new Error('Не удалось открыть приглашение. Запросите у друга новый код.', { cause: error });
+        throw new TypeError('Не удалось открыть приглашение. Запросите у друга новый код.', { cause: error });
       }
       throw error;
     } finally {

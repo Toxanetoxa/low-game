@@ -1,7 +1,9 @@
-import mqtt, { type MqttClient } from 'mqtt';
+import type { MqttClient } from 'mqtt';
+import type { OnlinePlayer, RoomIdentity } from './presence';
+import mqtt from 'mqtt';
 import { normalizeNickname } from './nickname';
 import { createRoomId } from './peer';
-import { isRoomIdentity, NicknamePresence, type OnlinePlayer, type RoomIdentity } from './presence';
+import { isRoomIdentity, NicknamePresence } from './presence';
 
 export type { OnlinePlayer, RoomIdentity } from './presence';
 export type PublicRoom = Readonly<{ id: string; host: RoomIdentity; nickname?: string }>;
@@ -9,13 +11,17 @@ export type DirectoryState = 'connecting' | 'online' | 'offline' | 'unsupported'
 
 type SignalContext = { roomId: string; requestId: string };
 const signalKinds = [
-  'request', 'reject', 'cancel', 'challenge', 'challenge-accept', 'challenge-decline', 'challenge-cancel',
+  'request',
+  'reject',
+  'cancel',
+  'challenge',
+  'challenge-accept',
+  'challenge-decline',
+  'challenge-cancel',
 ] as const;
 
-export type DirectorySignal = SignalContext & (
-  | { kind: typeof signalKinds[number] }
-  | { kind: 'invite' | 'answer'; code: string }
-);
+export type DirectorySignal = SignalContext &
+  ({ kind: (typeof signalKinds)[number] } | { kind: 'invite' | 'answer'; code: string });
 
 interface DirectoryCallbacks {
   onState: (state: DirectoryState) => void;
@@ -30,8 +36,8 @@ type Envelope = { sender: RoomIdentity; iv: string; data: string };
 
 const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
 const namespace = 'low-game/52d8ac30/v1';
-const roomsPrefix = namespace + '/rooms/';
-const inboxPrefix = namespace + '/inbox/';
+const roomsPrefix = `${namespace}/rooms/`;
+const inboxPrefix = `${namespace}/inbox/`;
 const roomLifetimeSeconds = 35;
 const heartbeatMs = 10_000;
 const signalLifetimeSeconds = 30;
@@ -52,15 +58,23 @@ function isUuid(value: unknown): value is string {
 
 function isSignal(value: unknown): value is DirectorySignal {
   if (!isRecord(value) || !isUuid(value.roomId) || !isUuid(value.requestId)) return false;
-  if (signalKinds.some((kind) => kind === value.kind)) return true;
-  return (value.kind === 'invite' || value.kind === 'answer')
-    && typeof value.code === 'string' && value.code.length <= maxCodeLength;
+  if (signalKinds.includes(value.kind as (typeof signalKinds)[number])) return true;
+  return (
+    (value.kind === 'invite' || value.kind === 'answer') &&
+    typeof value.code === 'string' &&
+    value.code.length <= maxCodeLength
+  );
 }
 
 function isEnvelope(value: unknown): value is Envelope {
-  return isRecord(value) && isRoomIdentity(value.sender)
-    && typeof value.iv === 'string' && /^[0-9a-f]{24}$/.test(value.iv)
-    && typeof value.data === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(value.data);
+  return (
+    isRecord(value) &&
+    isRoomIdentity(value.sender) &&
+    typeof value.iv === 'string' &&
+    /^[0-9a-f]{24}$/.test(value.iv) &&
+    typeof value.data === 'string' &&
+    /^[A-Z0-9+/]+={0,2}$/i.test(value.data)
+  );
 }
 
 function parse(text: string): unknown {
@@ -258,7 +272,7 @@ export class RoomDirectory {
   private startClient(identity: RoomIdentity): void {
     const client = mqtt.connect(brokerUrl, {
       protocolVersion: 5,
-      clientId: 'lg-' + createRoomId().replaceAll('-', '').slice(0, 20),
+      clientId: `lg-${createRoomId().replaceAll('-', '').slice(0, 20)}`,
       clean: true,
       keepalive: 20,
       connectTimeout: 8_000,
@@ -272,7 +286,9 @@ export class RoomDirectory {
     this.client = client;
 
     const inbox = inboxPrefix + identity.id;
-    client.on('connect', () => { void this.subscribe(client, identity, inbox); });
+    client.on('connect', () => {
+      void this.subscribe(client, identity, inbox);
+    });
     client.on('close', () => {
       this.connectionEpoch += 1;
       if (this.closed) return;
@@ -310,7 +326,7 @@ export class RoomDirectory {
   private async subscribe(client: MqttClient, identity: RoomIdentity, inbox: string): Promise<void> {
     const epoch = ++this.connectionEpoch;
     try {
-      const grants = await client.subscribeAsync([roomsPrefix + '+', inbox]);
+      const grants = await client.subscribeAsync([`${roomsPrefix}+`, inbox]);
       if (this.closed || !client.connected || epoch !== this.connectionEpoch) return;
       if (grants.length !== 2 || grants.some((grant) => grant.qos > 2)) {
         this.setState('offline');
@@ -369,7 +385,7 @@ export class RoomDirectory {
     }
 
     const previous = this.rooms.get(id)?.room;
-    const nickname = typeof room.nickname === 'string' ? normalizeNickname(room.nickname) ?? undefined : undefined;
+    const nickname = typeof room.nickname === 'string' ? (normalizeNickname(room.nickname) ?? undefined) : undefined;
     this.rooms.set(id, {
       room: { id, host: room.host, nickname },
       expiresAt: Date.now() + Math.min(remaining, roomLifetimeSeconds) * 1000,
@@ -425,7 +441,10 @@ export class RoomDirectory {
   }
 
   private emitRooms(): void {
-    this.callbacks.onRooms(Array.from(this.rooms.values(), (listing) => listing.room)
-      .sort((first, second) => first.id.localeCompare(second.id)));
+    this.callbacks.onRooms(
+      Array.from(this.rooms.values(), (listing) => listing.room).sort((first, second) =>
+        first.id.localeCompare(second.id),
+      ),
+    );
   }
 }

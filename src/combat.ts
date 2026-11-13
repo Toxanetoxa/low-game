@@ -206,35 +206,41 @@ function isNumberInRange(value: unknown, min: number, max: number): value is num
 }
 
 export function isInput(value: unknown): value is Input {
-  return isRecord(value)
-    && typeof value.left === 'boolean'
-    && typeof value.right === 'boolean'
-    && typeof value.jump === 'boolean'
-    && typeof value.attack === 'boolean'
-    && typeof value.block === 'boolean';
+  return (
+    isRecord(value) &&
+    typeof value.left === 'boolean' &&
+    typeof value.right === 'boolean' &&
+    typeof value.jump === 'boolean' &&
+    typeof value.attack === 'boolean' &&
+    typeof value.block === 'boolean'
+  );
 }
 
 function isFighterState(value: unknown): value is FighterState {
-  return isRecord(value)
-    && isNumberInRange(value.x, MIN_X, MAX_X)
-    && isNumberInRange(value.y, 0, FLOOR_Y)
-    && (value.facing === -1 || value.facing === 1)
-    && isNumberInRange(value.health, 0, MAX_HEALTH)
-    && isNumberInRange(value.attackTicks, 0, ATTACK_TICKS)
-    && isNumberInRange(value.hitTicks, 0, HIT_TICKS)
-    && isNumberInRange(value.blockHitTicks, 0, BLOCK_HIT_TICKS)
-    && typeof value.blocking === 'boolean'
-    && typeof value.grounded === 'boolean'
-    && typeof value.moving === 'boolean';
+  return (
+    isRecord(value) &&
+    isNumberInRange(value.x, MIN_X, MAX_X) &&
+    isNumberInRange(value.y, 0, FLOOR_Y) &&
+    (value.facing === -1 || value.facing === 1) &&
+    isNumberInRange(value.health, 0, MAX_HEALTH) &&
+    isNumberInRange(value.attackTicks, 0, ATTACK_TICKS) &&
+    isNumberInRange(value.hitTicks, 0, HIT_TICKS) &&
+    isNumberInRange(value.blockHitTicks, 0, BLOCK_HIT_TICKS) &&
+    typeof value.blocking === 'boolean' &&
+    typeof value.grounded === 'boolean' &&
+    typeof value.moving === 'boolean'
+  );
 }
 
 export function isGameState(value: unknown): value is GameState {
-  return isRecord(value)
-    && Array.isArray(value.fighters)
-    && value.fighters.length === 2
-    && isFighterState(value.fighters[0])
-    && isFighterState(value.fighters[1])
-    && isNumberInRange(value.ticksRemaining, 0, ROUND_TICKS)
-    && Number.isInteger(value.ticksRemaining)
-    && (value.winner === null || value.winner === 'draw' || value.winner === 0 || value.winner === 1);
+  return (
+    isRecord(value) &&
+    Array.isArray(value.fighters) &&
+    value.fighters.length === 2 &&
+    isFighterState(value.fighters[0]) &&
+    isFighterState(value.fighters[1]) &&
+    isNumberInRange(value.ticksRemaining, 0, ROUND_TICKS) &&
+    Number.isInteger(value.ticksRemaining) &&
+    (value.winner === null || value.winner === 'draw' || value.winner === 0 || value.winner === 1)
+  );
 }
