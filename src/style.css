@@ -485,6 +485,14 @@ select:focus-visible {
   line-height: 1.45;
 }
 
+.round-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
 .button {
   display: inline-flex;
   justify-content: center;
@@ -511,7 +519,6 @@ select:focus-visible {
 
 .button-arena {
   min-height: 36px;
-  margin-top: 15px;
   border-color: #7c718b;
   background: #191527;
   color: var(--ink);
@@ -993,6 +1000,12 @@ select:focus-visible {
   margin-top: 12px;
 }
 
+#private-share-telegram {
+  display: none;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
 #private-join-error:empty {
   display: none;
 }
@@ -1302,6 +1315,18 @@ select:focus-visible {
 }
 
 @media (any-pointer: coarse) {
+  html,
+  body,
+  .game-layout,
+  .nickname-screen,
+  .stake-panel,
+  .faucet-panel,
+  .faucet-address,
+  .online-players,
+  .public-rooms {
+    touch-action: manipulation;
+  }
+
   .touch-controls {
     display: flex;
   }
@@ -1370,9 +1395,12 @@ select:focus-visible {
     margin-top: 5px;
   }
 
+  .round-actions {
+    margin-top: 7px;
+  }
+
   .button-arena {
     min-height: 30px;
-    margin-top: 7px;
     padding: 4px 8px;
     font-size: 0.72rem;
   }
@@ -1383,6 +1411,10 @@ select:focus-visible {
 }
 
 @media (pointer: coarse) and (hover: none) {
+  #private-share-telegram {
+    display: inline-flex;
+  }
+
   body {
     position: fixed;
     inset: 0;
@@ -1641,6 +1673,10 @@ select:focus-visible {
 
   body[data-mobile-match='true'] .button-arena {
     min-height: 44px;
+    padding-inline: 8px;
+  }
+
+  body[data-mobile-match='true'] .round-actions {
     margin-top: 8px;
   }
 

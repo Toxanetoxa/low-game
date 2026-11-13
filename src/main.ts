@@ -33,6 +33,8 @@ const ui = {
   title: element('arena-title'),
   arenaMessage: element('arena-message'),
   rematch: element<HTMLButtonElement>('rematch'),
+  roundActions: element('round-actions'),
+  roundLobby: element<HTMLButtonElement>('round-lobby'),
   health: [element('p1-health'), element('p2-health')],
   hp: [element('p1-hp'), element('p2-hp')],
   healthLabel: [element('p1-health-label'), element('p2-health-label')],
@@ -60,6 +62,7 @@ const ui = {
   privateShareValue: element<HTMLInputElement>('private-share-value'),
   privateShareLabel: element('private-share-label'),
   privateShareCopy: element<HTMLButtonElement>('private-share-copy'),
+  privateShareTelegram: element<HTMLAnchorElement>('private-share-telegram'),
   manualConnection: element<HTMLDetailsElement>('manual-connection'),
   exchange: element('lobby-exchange'),
   connected: element('lobby-connected'),
@@ -161,7 +164,7 @@ let connectTimer: number | undefined;
 let match: Frame | null = null;
 let snapshotTick = 0;
 let matchDirty = false;
-let rematchRequested = false;
+let rematchReady = { local: false, opponent: false, sendFailed: false };
 let remoteInput: Readonly<Input> = EMPTY_INPUT;
 let remoteJump = false;
 let remoteAttack = false;
@@ -329,14 +332,13 @@ function connection(text: string, state: 'idle' | 'pending' | 'connected' | 'err
   ui.indicator.dataset.state = state;
 }
 
-function overlay(title: string, kicker: string, text: string, rematch = false): void {
+function overlay(title: string, kicker: string, text: string): void {
   ui.overlay.hidden = title === '';
   setText(ui.title, title);
   setText(ui.kicker, kicker);
   setText(ui.arenaMessage, text);
   ui.kicker.hidden = kicker === '';
   ui.arenaMessage.hidden = text === '';
-  ui.rematch.hidden = !rematch;
 }
 
 function clearLocalInputs(): void {
@@ -364,7 +366,7 @@ function resetMatch(): void {
   delete document.body.dataset.mobileMatch;
   delete document.body.dataset.mobileFighter;
   void exitMatchFullscreen();
-  ui.rematch.disabled = false;
+  rematchReady = { local: false, opponent: false, sendFailed: false };
 }
 
 function updateFullscreenButton(): void {
@@ -421,8 +423,7 @@ function nextRound(stakeKey?: Hex): void {
   snapshotTick = 0;
   match = { kind: 'frame', game: game.state, scores, round, countdown: countdownTicks, stakeKey };
   matchDirty = true;
-  rematchRequested = false;
-  ui.rematch.disabled = false;
+  rematchReady = { local: false, opponent: false, sendFailed: false };
 }
 
 function startMatch(nextMode: PeerRole): void {
@@ -608,29 +609,30 @@ function receive(session: PeerSession, data: unknown): void {
     return;
   }
 
+  if (packet.kind === 'rematch-ready') {
+    if (match && packet.round === match.round && (session.role === 'guest' || match.game.winner !== null)) {
+      rematchReady.opponent = true;
+    }
+    return;
+  }
+
   if (stakes.receive(packet)) return;
   if (session.role === 'host') {
     if (packet.kind === 'input' && isInput(packet.input)) {
       remoteJump ||= packet.jumpPressed === true || (packet.input.jump && !remoteInput.jump);
       remoteAttack ||= packet.attackPressed === true || (packet.input.attack && !remoteInput.attack);
       remoteInput = packet.input;
-    } else if (
-      packet.kind === 'rematch' &&
-      match &&
-      match.game.winner !== null &&
-      packet.round === match.round &&
-      !stakes.hasMatch
-    ) {
-      nextRound();
     }
   } else if (isFrame(packet) && (!match || packet.round >= match.round)) {
     if (packet.stakeKey && !stakes.canPlay(packet.stakeKey)) return;
     if (packet.round !== match?.round) {
+      if (match && !packet.stakeKey && !(rematchReady.local && rematchReady.opponent)) {
+        return;
+      }
       localJump = false;
       localAttack = false;
       predictedGuestX = null;
-      rematchRequested = false;
-      ui.rematch.disabled = false;
+      rematchReady = { local: false, opponent: false, sendFailed: false };
     }
     match = packet;
     if (packet.stakeKey && packet.game.winner !== null) stakes.recordResult(packet.stakeKey, packet.game.winner);
@@ -815,6 +817,7 @@ function openPublicWait(attempt: PublicAttempt, title: string, text: string): vo
 function showPrivateWait(code: string): void {
   const online = directoryState === 'online';
   const asLink = canShareLink();
+  const invitation = asLink ? inviteLink(code) : code;
   setText(ui.publicWaitTitle, 'Закрытая комната');
   setText(
     ui.publicWaitMessage,
@@ -824,7 +827,16 @@ function showPrivateWait(code: string): void {
   );
   setText(ui.privateShareLabel, asLink ? 'Ссылка для друга' : 'Код для друга');
   setText(ui.privateShareCopy, asLink ? 'Скопировать ссылку' : 'Скопировать код');
-  ui.privateShareValue.value = asLink ? inviteLink(code) : code;
+  ui.privateShareValue.value = invitation;
+  ui.privateShareTelegram.hidden = !asLink || !online;
+  if (ui.privateShareTelegram.hidden) {
+    ui.privateShareTelegram.removeAttribute('href');
+  } else {
+    const telegram = new URL('https://t.me/share/url');
+    telegram.searchParams.set('url', invitation);
+    telegram.searchParams.set('text', 'Сыграем в LOW GAME?');
+    ui.privateShareTelegram.href = telegram.href;
+  }
   ui.privateShare.hidden = false;
   ui.publicWaitRoomId.hidden = true;
   ui.privateShareCopy.disabled = !online;
@@ -1444,6 +1456,11 @@ function simulate(): void {
   }
   if (!match) return;
 
+  if (match.game.winner !== null && rematchReady.local && rematchReady.opponent && !stakes.hasMatch) {
+    nextRound();
+    return;
+  }
+
   if (match.countdown > 0) {
     match.countdown -= 1;
     remoteJump = false;
@@ -1506,6 +1523,12 @@ function updateScreen(): void {
   const seconds = Math.ceil(state.ticksRemaining / TICK_RATE);
   setText(ui.timer, String(seconds).padStart(2, '0'));
 
+  const roundEnded = Boolean(match && state.winner !== null);
+  ui.roundActions.hidden = mode === 'idle' || (!roundEnded && linkOpen);
+  ui.rematch.hidden = !roundEnded || !linkOpen || stakes.hasMatch;
+  ui.rematch.disabled = rematchReady.local;
+  setText(ui.rematch, rematchReady.opponent && !rematchReady.local ? 'Принять реванш' : 'Реванш');
+
   if (mode === 'idle') {
     if (peer || publicAttempt || challenge) {
       overlay('Ждём соперника', 'СЕТЕВОЙ МАТЧ', 'Завершите подключение в лобби.');
@@ -1520,13 +1543,13 @@ function updateScreen(): void {
     overlay(String(Math.ceil(match.countdown / TICK_RATE)), `РАУНД ${match.round}`, '');
   } else if (state.winner !== null) {
     const winner = state.winner === 'draw' ? 'Ничья' : `Победа · ${fighterNames()[state.winner]}`;
-    const reason = seconds === 0 ? 'Время вышло' : 'Нокаут';
-    overlay(
-      winner,
-      `РАУНД ${match.round} ЗАВЕРШЁН`,
-      rematchRequested ? 'Ждём начала раунда…' : reason,
-      !stakes.hasMatch,
-    );
+    let detail = seconds === 0 ? 'Время вышло' : 'Нокаут';
+    if (stakes.hasMatch) detail = 'Реванш доступен после расчёта ставки.';
+    else if (rematchReady.sendFailed) detail = 'Не удалось отправить. Нажмите ещё раз.';
+    else if (rematchReady.local) {
+      detail = rematchReady.opponent ? 'Начинаем реванш…' : 'Ждём подтверждения соперника…';
+    } else if (rematchReady.opponent) detail = 'Соперник предлагает реванш.';
+    overlay(winner, `РАУНД ${match.round} ЗАВЕРШЁН`, detail);
   } else {
     overlay('', '', '');
   }
@@ -1569,8 +1592,9 @@ ui.copyLink.addEventListener('click', () => {
 ui.privateShareCopy.addEventListener('click', () => {
   void copyInvite(ui.privateShareValue.value, ui.privateShareValue, canShareLink());
 });
-ui.leave.addEventListener('click', () => closeRoom('', false, true));
-ui.mobileLeave.addEventListener('click', () => closeRoom('', false, true));
+for (const button of [ui.leave, ui.mobileLeave, ui.roundLobby]) {
+  button.addEventListener('click', () => closeRoom('', false, true));
+}
 ui.mobileFullscreen.hidden =
   !document.fullscreenEnabled || typeof document.documentElement.requestFullscreen !== 'function';
 ui.mobileFullscreen.addEventListener('click', () => {
@@ -1578,14 +1602,9 @@ ui.mobileFullscreen.addEventListener('click', () => {
 });
 document.addEventListener('fullscreenchange', updateFullscreenButton);
 ui.rematch.addEventListener('click', () => {
-  if (!match || match.game.winner === null || stakes.hasMatch) return;
-  ui.rematch.blur();
-  if (mode === 'host') {
-    nextRound();
-  } else if (mode === 'guest' && peer?.send({ kind: 'rematch', round: match.round })) {
-    rematchRequested = true;
-    ui.rematch.disabled = true;
-  }
+  if (!linkOpen || !match || match.game.winner === null || stakes.hasMatch || rematchReady.local) return;
+  rematchReady.local = peer?.send({ kind: 'rematch-ready', round: match.round }) ?? false;
+  rematchReady.sendFailed = !rematchReady.local;
 });
 
 document.addEventListener('keydown', pressKey);

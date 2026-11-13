@@ -102,8 +102,13 @@
               <div class="overlay-content">
                 <p id="arena-kicker" class="arena-kicker" hidden></p>
                 <h2 id="arena-title">К бою!</h2>
-                <p id="arena-message" class="arena-message">Создайте комнату или выберите соперника в лобби.</p>
-                <button id="rematch" class="button button-arena" type="button" hidden>Реванш</button>
+                <p id="arena-message" class="arena-message" role="status">
+                  Создайте комнату или выберите соперника в лобби.
+                </p>
+                <div id="round-actions" class="round-actions" hidden>
+                  <button id="rematch" class="button button-arena" type="button" hidden>Реванш</button>
+                  <button id="round-lobby" class="button button-arena" type="button">В лобби</button>
+                </div>
               </div>
             </div>
           </div>
@@ -293,7 +298,17 @@
             <div id="private-share" class="lobby-form" hidden>
               <label id="private-share-label" for="private-share-value">Приглашение</label>
               <input id="private-share-value" type="text" readonly spellcheck="false" />
-              <button id="private-share-copy" class="button button-primary" type="button"></button>
+              <a
+                id="private-share-telegram"
+                class="button button-primary"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Поделиться через Telegram"
+                hidden
+              >
+                Поделиться
+              </a>
+              <button id="private-share-copy" class="button button-secondary" type="button"></button>
             </div>
           </div>
 
