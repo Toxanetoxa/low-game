@@ -4,23 +4,29 @@ export const FLOOR_Y = 350;
 export const TICK_RATE = 60;
 export const ROUND_SECONDS = 60;
 export const MAX_HEALTH = 100;
-export const ATTACK_TICKS = 26;
-export const ATTACK_ACTIVE_TICK = 17;
 
 const ROUND_TICKS = ROUND_SECONDS * TICK_RATE;
 const MIN_X = 58;
 const MAX_X = STAGE_WIDTH - MIN_X;
 const BODY_WIDTH = 58;
 const BODY_HEIGHT = 64;
-const WALK_SPEED = 4.8;
-const JUMP_SPEED = -13;
-const GRAVITY = 0.75;
-const ATTACK_REACH = 111;
-const ATTACK_HEIGHT = 58;
+const WALK_SPEED = 7.2;
+const JUMP_SPEED = -15;
+const GRAVITY = 0.95;
 const HIT_TICKS = 14;
 const BLOCK_HIT_TICKS = 10;
+const BUFFER_TICKS = 9;
+const LEGACY_ATTACK_TICKS = 26;
+const LEGACY_ACTIVE_TICK = 17;
+const attacks = {
+  jab: { ticks: 17, active: 13, reach: 103, height: 58, damage: 9, push: 9 },
+  cross: { ticks: 21, active: 15, reach: 115, height: 58, damage: 14, push: 26 },
+  lunge: { ticks: 25, active: 17, reach: 124, height: 58, damage: 16, push: 32 },
+  air: { ticks: 19, active: 15, reach: 112, height: 80, damage: 12, push: 22 },
+};
 
 export type PlayerIndex = 0 | 1;
+export type AttackKind = keyof typeof attacks;
 
 export type Input = {
   left: boolean;
@@ -38,12 +44,18 @@ export const EMPTY_INPUT: Readonly<Input> = Object.freeze({
   block: false,
 });
 
+type StepInput = Input & {
+  jumpPressed?: boolean;
+  attackPressed?: boolean;
+};
+
 export type FighterState = {
   x: number;
   y: number;
   facing: -1 | 1;
   health: number;
   attackTicks: number;
+  attackKind?: AttackKind;
   hitTicks: number;
   blockHitTicks: number;
   blocking: boolean;
@@ -84,6 +96,30 @@ function clampX(x: number): number {
   return Math.min(MAX_X, Math.max(MIN_X, x));
 }
 
+function walkDirection(input: Input): number {
+  return Number(input.right) - Number(input.left);
+}
+
+export function predictWalk(
+  fighter: FighterState,
+  opponent: FighterState,
+  previousX: number,
+  input: Input,
+  ticks: number,
+): number {
+  const distance = Math.min(48, WALK_SPEED * ticks);
+  const x = fighter.x;
+  const projected = Math.max(x - 48, Math.min(x + 48, previousX + walkDirection(input) * distance));
+  if (Math.abs(fighter.y - opponent.y) >= BODY_HEIGHT) return clampX(projected);
+  return clampX(
+    x <= opponent.x ? Math.min(projected, opponent.x - BODY_WIDTH) : Math.max(projected, opponent.x + BODY_WIDTH),
+  );
+}
+
+export function attackActiveTick(fighter: FighterState): number {
+  return fighter.attackKind ? attacks[fighter.attackKind].active : LEGACY_ACTIVE_TICK;
+}
+
 function separateFighters(left: FighterState, right: FighterState): void {
   if (Math.abs(left.y - right.y) >= BODY_HEIGHT || right.x - left.x >= BODY_WIDTH) return;
 
@@ -92,41 +128,47 @@ function separateFighters(left: FighterState, right: FighterState): void {
   right.x = left.x + BODY_WIDTH;
 }
 
-type Strike = 'hit' | 'block' | null;
+type Strike = { kind: 'hit' | 'block'; damage: number; push: number };
 
-function checkStrike(attacker: FighterState, target: FighterState): Strike {
-  if (attacker.attackTicks !== ATTACK_ACTIVE_TICK) return null;
+function checkStrike(attacker: FighterState, target: FighterState): Strike | null {
+  if (!attacker.attackKind) return null;
+  const { active, reach, height, damage, push } = attacks[attacker.attackKind];
+  if (attacker.attackTicks !== active) return null;
 
   const distance = (target.x - attacker.x) * attacker.facing;
-  if (distance < 0 || distance > ATTACK_REACH || Math.abs(attacker.y - target.y) >= ATTACK_HEIGHT) {
+  if (distance < 0 || distance > reach || Math.abs(attacker.y - target.y) >= height) {
     return null;
   }
 
-  return target.blocking && target.facing !== attacker.facing ? 'block' : 'hit';
+  return { kind: target.blocking && target.facing !== attacker.facing ? 'block' : 'hit', damage, push };
 }
 
-function applyStrike(strike: Strike, target: FighterState, direction: FighterState['facing']): void {
+function applyStrike(strike: Strike | null, target: FighterState, direction: FighterState['facing']): void {
   if (strike === null) return;
-  if (strike === 'block') {
+  if (strike.kind === 'block') {
     target.health = Math.max(0, target.health - 2);
     target.blockHitTicks = BLOCK_HIT_TICKS;
     target.x = clampX(target.x + direction * 15);
     return;
   }
 
-  target.health = Math.max(0, target.health - 14);
+  target.health = Math.max(0, target.health - strike.damage);
   target.hitTicks = HIT_TICKS;
   target.blockHitTicks = 0;
   target.attackTicks = 0;
+  target.attackKind = undefined;
   target.blocking = false;
   target.moving = false;
-  target.x = clampX(target.x + direction * 34);
+  target.x = clampX(target.x + direction * strike.push);
 }
 
 export class Combat {
   private current = initialState();
   private verticalSpeed: [number, number] = [0, 0];
   private jumpHeld: [boolean, boolean] = [false, false];
+  private attackHeld: [boolean, boolean] = [false, false];
+  private jumpBuffer: [number, number] = [0, 0];
+  private attackBuffer: [number, number] = [0, 0];
 
   get state(): GameState {
     return this.current;
@@ -136,9 +178,12 @@ export class Combat {
     this.current = initialState();
     this.verticalSpeed = [0, 0];
     this.jumpHeld = [false, false];
+    this.attackHeld = [false, false];
+    this.jumpBuffer = [0, 0];
+    this.attackBuffer = [0, 0];
   }
 
-  step(inputs: readonly [Input, Input]): void {
+  step(inputs: readonly [StepInput, StepInput]): void {
     if (this.current.winner !== null) return;
 
     const [first, second] = this.current.fighters;
@@ -146,7 +191,7 @@ export class Combat {
     this.advanceFighter(0, inputs[0], firstWasOnLeft ? 1 : -1);
     this.advanceFighter(1, inputs[1], firstWasOnLeft ? -1 : 1);
 
-    const [left, right] = firstWasOnLeft ? [first, second] : [second, first];
+    const [left, right] = first.x <= second.x ? [first, second] : [second, first];
     separateFighters(left, right);
 
     const firstStrike = checkStrike(first, second);
@@ -161,33 +206,51 @@ export class Combat {
     }
   }
 
-  private advanceFighter(index: PlayerIndex, input: Input, direction: FighterState['facing']): void {
+  private advanceFighter(index: PlayerIndex, input: StepInput, direction: FighterState['facing']): void {
     const fighter = this.current.fighters[index];
-    const jumpPressed = input.jump && !this.jumpHeld[index];
+    const jumpPressed = input.jumpPressed ?? (input.jump && !this.jumpHeld[index]);
+    const attackPressed = input.attackPressed ?? (input.attack && !this.attackHeld[index]);
     this.jumpHeld[index] = input.jump;
+    this.attackHeld[index] = input.attack;
+    this.jumpBuffer[index] = jumpPressed ? BUFFER_TICKS : Math.max(0, this.jumpBuffer[index] - 1);
+    this.attackBuffer[index] = attackPressed ? BUFFER_TICKS : Math.max(0, this.attackBuffer[index] - 1);
     fighter.attackTicks = Math.max(0, fighter.attackTicks - 1);
     fighter.hitTicks = Math.max(0, fighter.hitTicks - 1);
     fighter.blockHitTicks = Math.max(0, fighter.blockHitTicks - 1);
 
+    const canChain =
+      fighter.attackKind === 'jab' && fighter.attackTicks > 0 && fighter.attackTicks <= 8 && fighter.grounded;
+    if (fighter.attackTicks === 0) fighter.attackKind = undefined;
     const canAct = fighter.attackTicks === 0 && fighter.hitTicks === 0;
     if (canAct) fighter.facing = direction;
     fighter.blocking = canAct && input.block && fighter.grounded;
     fighter.moving = false;
 
-    if (canAct && !fighter.blocking) {
-      if (jumpPressed && fighter.grounded) {
-        this.verticalSpeed[index] = JUMP_SPEED;
-        fighter.grounded = false;
-      }
-      if (input.attack) {
-        fighter.attackTicks = ATTACK_TICKS;
-      } else {
-        const walkDirection = Number(input.right) - Number(input.left);
-        const nextX = clampX(fighter.x + walkDirection * WALK_SPEED);
-        fighter.moving = nextX !== fighter.x;
-        fighter.x = nextX;
-      }
+    if (canAct && !fighter.blocking && this.jumpBuffer[index] && fighter.grounded) {
+      this.jumpBuffer[index] = 0;
+      this.verticalSpeed[index] = JUMP_SPEED;
+      fighter.grounded = false;
     }
+
+    const walk = walkDirection(input);
+    if (!fighter.blocking && this.attackBuffer[index] && (canAct || canChain)) {
+      let kind: AttackKind = 'jab';
+      if (canChain) kind = 'cross';
+      else if (!fighter.grounded) kind = 'air';
+      else if (walk === direction) kind = 'lunge';
+      fighter.attackKind = kind;
+      fighter.attackTicks = attacks[kind].ticks;
+      this.attackBuffer[index] = 0;
+    }
+
+    let speed = 0;
+    if (fighter.attackKind === 'lunge' && fighter.attackTicks >= attacks.lunge.active) speed = fighter.facing * 7;
+    else if (fighter.hitTicks === 0 && !fighter.blocking && (fighter.attackTicks === 0 || !fighter.grounded)) {
+      speed = walk * WALK_SPEED;
+    }
+    const nextX = clampX(fighter.x + speed);
+    fighter.moving = nextX !== fighter.x;
+    fighter.x = nextX;
 
     if (fighter.grounded) return;
     fighter.y = Math.min(FLOOR_Y, fighter.y + this.verticalSpeed[index]);
@@ -223,7 +286,9 @@ function isFighterState(value: unknown): value is FighterState {
     isNumberInRange(value.y, 0, FLOOR_Y) &&
     (value.facing === -1 || value.facing === 1) &&
     isNumberInRange(value.health, 0, MAX_HEALTH) &&
-    isNumberInRange(value.attackTicks, 0, ATTACK_TICKS) &&
+    isNumberInRange(value.attackTicks, 0, LEGACY_ATTACK_TICKS) &&
+    (value.attackKind === undefined ||
+      (typeof value.attackKind === 'string' && Object.hasOwn(attacks, value.attackKind))) &&
     isNumberInRange(value.hitTicks, 0, HIT_TICKS) &&
     isNumberInRange(value.blockHitTicks, 0, BLOCK_HIT_TICKS) &&
     typeof value.blocking === 'boolean' &&

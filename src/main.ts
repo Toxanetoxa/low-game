@@ -2,10 +2,11 @@ import type { GameState, Input } from './combat';
 import type { DirectorySignal, DirectoryState, OnlinePlayer, PublicRoom, RoomIdentity } from './directory';
 import type { PeerRole, PeerState } from './peer';
 import type { Hex } from './stake-wallet';
-import { Combat, EMPTY_INPUT, isGameState, isInput, MAX_HEALTH, TICK_RATE } from './combat';
+import { Combat, EMPTY_INPUT, isGameState, isInput, MAX_HEALTH, predictWalk, TICK_RATE } from './combat';
 import { RoomDirectory } from './directory';
 import { normalizeNickname } from './nickname';
 import { createRoomId, PeerSession, readInviteRoomId } from './peer';
+import { privateInviteCode, readPrivateInvite } from './private-invite';
 import { ArenaRenderer } from './render';
 import { Stakes } from './stakes';
 
@@ -34,6 +35,8 @@ const ui = {
   rematch: element<HTMLButtonElement>('rematch'),
   health: [element('p1-health'), element('p2-health')],
   hp: [element('p1-hp'), element('p2-hp')],
+  healthLabel: [element('p1-health-label'), element('p2-health-label')],
+  fighterName: [element('p1-name'), element('p2-name')],
   score: [element('p1-score'), element('p2-score')],
   timer: element('timer'),
   indicator: element('connection-indicator'),
@@ -53,13 +56,19 @@ const ui = {
   publicWaitTitle: element('public-wait-title'),
   publicWaitMessage: element('public-wait-message'),
   publicWaitRoomId: element('public-wait-room-id'),
+  privateShare: element('private-share'),
+  privateShareValue: element<HTMLInputElement>('private-share-value'),
+  privateShareLabel: element('private-share-label'),
+  privateShareCopy: element<HTMLButtonElement>('private-share-copy'),
   manualConnection: element<HTMLDetailsElement>('manual-connection'),
   exchange: element('lobby-exchange'),
   connected: element('lobby-connected'),
   useStun: element<HTMLInputElement>('use-stun'),
   create: element<HTMLButtonElement>('create-room'),
+  createManual: element<HTMLButtonElement>('create-manual-room'),
   join: element<HTMLFormElement>('join-form'),
-  invite: element<HTMLTextAreaElement>('invite-input'),
+  invite: element<HTMLInputElement>('invite-input'),
+  privateJoinError: element('private-join-error'),
   exchangeTitle: element('exchange-title'),
   instructions: element('exchange-instructions'),
   outgoingLabel: element('outgoing-label'),
@@ -67,7 +76,7 @@ const ui = {
   copy: element<HTMLButtonElement>('copy-code'),
   copyLink: element<HTMLButtonElement>('copy-link'),
   answerForm: element<HTMLFormElement>('answer-form'),
-  answer: element<HTMLTextAreaElement>('answer-input'),
+  answer: element<HTMLInputElement>('answer-input'),
   acceptAnswer: element<HTMLButtonElement>('accept-answer'),
   roomId: element('room-id'),
   lobbyMessage: element('lobby-message'),
@@ -93,7 +102,6 @@ const keyCaps = new Map(
 );
 const keyFlashTimers = new Map<string, number>();
 
-const fighters = ['RUST', 'VOLT'] as const;
 const nicknameStorageKey = 'low-game.nickname';
 const challengeWaitMs = 30_000;
 const countdownTicks = 3 * TICK_RATE;
@@ -110,10 +118,11 @@ type PublicAttempt =
       roomId: string;
       nickname: string;
       listed: boolean;
+      privateCode?: string;
       guest: Admission | null;
       awaitingAnswer: boolean;
     }
-  | { role: 'guest'; roomId: string; host: Admission };
+  | { role: 'guest'; roomId: string; host: Admission; privateRoom?: boolean };
 
 type Challenge = {
   direction: 'incoming' | 'outgoing';
@@ -132,7 +141,9 @@ type Frame = {
 };
 
 let nickname: string | null = null;
+let opponentNickname: string | null = null;
 let checkingNickname = false;
+let sharedInvite = new URLSearchParams(location.hash.slice(1)).get('invite');
 let mode: Mode = 'idle';
 let peer: PeerSession | null = null;
 let directory: RoomDirectory | null = null;
@@ -154,21 +165,43 @@ let rematchRequested = false;
 let remoteInput: Readonly<Input> = EMPTY_INPUT;
 let remoteJump = false;
 let remoteAttack = false;
+let localJump = false;
+let localAttack = false;
 let sentInput = '';
+let predictedGuestX: number | null = null;
 const keys = new Set<string>();
-const touchActions = new Map<number, { action: keyof Input; button: HTMLButtonElement }>();
+const touchActions = new Map<number, { cluster: Element; button: HTMLButtonElement | null }>();
 let ownsMatchFullscreen = false;
 
 const stakes = new Stakes({
   send: (packet) => peer?.send(packet) ?? false,
   startRound: (key) => nextRound(key),
   clearInput: clearLocalInputs,
+  fighterNames,
 });
 
 type LockableOrientation = ScreenOrientation & { lock?: (orientation: 'landscape') => Promise<void> };
 
 function setText(node: HTMLElement, value: string): void {
   if (node.textContent !== value) node.textContent = value;
+}
+
+function fighterNames(): readonly [string, string] {
+  const own = nickname ?? 'Вы';
+  const opponent = opponentNickname ?? 'Соперник';
+  return (peer?.role ?? mode) === 'guest' ? [opponent, own] : [own, opponent];
+}
+
+function updateFighterNames(): void {
+  const names = fighterNames();
+  for (const slot of [0, 1] as const) {
+    setText(ui.fighterName[slot], names[slot]);
+    ui.fighterName[slot].title = names[slot];
+    setText(ui.healthLabel[slot], `Здоровье · ${names[slot]} `);
+  }
+  const localFighter = mode === 'idle' ? null : nickname;
+  ui.touch.setAttribute('aria-label', localFighter ? `Управление бойцом ${localFighter}` : 'Управление бойцом');
+  setText(ui.mobileFighter, localFighter ? `Вы — ${localFighter}` : '');
 }
 
 function storedNickname(): string | null {
@@ -182,7 +215,7 @@ function storedNickname(): string | null {
 function showNicknameScreen(name = nickname ?? '', focus = Boolean(nickname)): void {
   ui.nicknameInput.value = name;
   ui.cancelNickname.hidden = !nickname;
-  setText(ui.nicknameSubmit, nickname ? 'Сохранить' : 'Войти в лобби');
+  setText(ui.nicknameSubmit, nickname ? 'Сохранить' : sharedInvite ? 'Войти по приглашению' : 'Войти в лобби');
   setNicknameError('');
   setNicknameStatus('');
   ui.nicknameScreen.hidden = false;
@@ -200,6 +233,7 @@ function showGame(name: string): void {
   const editing = nickname !== null && !ui.nicknameScreen.hidden;
   nickname = name;
   setText(ui.playerNickname, name);
+  updateFighterNames();
   ui.nicknameScreen.hidden = true;
   ui.header.hidden = false;
   ui.layout.hidden = false;
@@ -208,6 +242,7 @@ function showGame(name: string): void {
   renderPublicRooms();
   renderOnlinePlayers();
   if (editing) ui.editNickname.focus();
+  if (sharedInvite) void joinSharedInvite();
 }
 
 function setNicknameError(text: string): void {
@@ -306,8 +341,11 @@ function overlay(title: string, kicker: string, text: string, rematch = false): 
 
 function clearLocalInputs(): void {
   keys.clear();
-  for (const { button } of touchActions.values()) button.classList.remove('is-pressed');
+  for (const { button } of touchActions.values()) button?.classList.remove('is-pressed');
   touchActions.clear();
+  localJump = false;
+  localAttack = false;
+  sendGuestInput();
 }
 
 function clearInputs(): void {
@@ -376,6 +414,11 @@ function nextRound(stakeKey?: Hex): void {
   const scores = match?.scores ?? [0, 0];
   const round = (match?.round ?? 0) + 1;
   game.reset();
+  localJump = false;
+  localAttack = false;
+  remoteJump = false;
+  remoteAttack = false;
+  snapshotTick = 0;
   match = { kind: 'frame', game: game.state, scores, round, countdown: countdownTicks, stakeKey };
   matchDirty = true;
   rematchRequested = false;
@@ -385,13 +428,11 @@ function nextRound(stakeKey?: Hex): void {
 function startMatch(nextMode: PeerRole): void {
   resetMatch();
   mode = nextMode;
-  const fighter = fighters[nextMode === 'guest' ? 1 : 0];
   ui.layout.scrollTop = 0;
   document.body.dataset.mobileMatch = 'true';
-  document.body.dataset.mobileFighter = fighter.toLowerCase();
+  document.body.dataset.mobileFighter = nextMode === 'guest' ? 'volt' : 'rust';
   ui.touch.hidden = false;
-  ui.touch.setAttribute('aria-label', `Управление ${fighter}`);
-  setText(ui.mobileFighter, `Вы — ${fighter}`);
+  updateFighterNames();
   sentInput = '';
   if (nextMode === 'host') nextRound();
 }
@@ -405,9 +446,15 @@ function canShareLink(): boolean {
 
 function inviteFrom(text: string): string {
   const value = text.trim();
-  if (!/^https?:\/\//i.test(value)) return value;
-  const url = new URL(value);
-  return new URLSearchParams(url.hash.slice(1)).get('invite') ?? value;
+  if (!/^(?:https?|file):\/\//i.test(value)) return value;
+  const { hash } = new URL(value);
+  return new URLSearchParams(hash.slice(1)).get('invite') ?? value;
+}
+
+function inviteLink(code: string): string {
+  const url = new URL(location.href);
+  url.hash = new URLSearchParams({ invite: code }).toString();
+  return url.href;
 }
 
 function setLobby(step: 'initial' | 'exchange' | 'public' | 'challenge' | 'connected'): void {
@@ -436,6 +483,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
     );
   }
   const attempt = publicAttempt;
+  const failedPrivateJoin = isError && !linkOpen && attempt?.role === 'guest' && attempt.privateRoom;
   publicAttempt = null;
   if (attempt?.role === 'host' && attempt.listed) directory?.withdraw(attempt.roomId);
   if (attempt && notifyPeer) {
@@ -444,6 +492,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
   }
   const closing = peer;
   peer = null;
+  opponentNickname = null;
   linkOpen = false;
   stakes.disconnect();
   if (notifyPeer && closing?.send({ kind: 'leave' })) {
@@ -452,6 +501,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
     closing?.close();
   }
   resetMatch();
+  updateFighterNames();
   ui.outgoing.value = '';
   ui.answer.value = '';
   ui.acceptAnswer.disabled = false;
@@ -459,7 +509,12 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
   setLobby('initial');
   renderOnlinePlayers();
   connection(isError ? 'Связь прервана' : 'Нет соединения', isError ? 'error' : 'idle');
-  message(note, isError);
+  if (failedPrivateJoin) {
+    message('');
+    showPrivateJoinError(note);
+  } else {
+    message(note, isError);
+  }
 }
 
 function peerState(session: PeerSession, state: PeerState): void {
@@ -472,8 +527,9 @@ function peerState(session: PeerSession, state: PeerState): void {
     ui.roomId.textContent = session.roomId;
     setLobby('connected');
     connection('P2P · соединено', 'connected');
-    message(`Ваш боец — ${fighters[session.role === 'host' ? 0 : 1]}.`);
+    message(opponentNickname ? `Соперник · ${opponentNickname}` : '');
     if (mode !== session.role) startMatch(session.role);
+    if (nickname) session.send({ kind: 'player-profile', nickname });
     if (session.roomId) stakes.connect(session.roomId, session.role);
     matchDirty = true;
     return;
@@ -495,7 +551,12 @@ function peerState(session: PeerSession, state: PeerState): void {
   }
 
   if (state === 'failed') {
-    if (!linkOpen && mode === 'idle' && publicAttempt?.role === 'host' && publicAttempt.listed) {
+    if (
+      !linkOpen &&
+      mode === 'idle' &&
+      publicAttempt?.role === 'host' &&
+      (publicAttempt.listed || publicAttempt.privateCode)
+    ) {
       void reopenPublicRoom(publicAttempt, 'Прямое соединение с соперником недоступно.');
       return;
     }
@@ -537,11 +598,21 @@ function receive(session: PeerSession, data: unknown): void {
     return;
   }
 
+  if (packet.kind === 'player-profile' && typeof packet.nickname === 'string') {
+    const name = normalizeNickname(packet.nickname);
+    if (name) {
+      opponentNickname = name;
+      if (linkOpen) message(`Соперник · ${name}`);
+      updateFighterNames();
+    }
+    return;
+  }
+
   if (stakes.receive(packet)) return;
   if (session.role === 'host') {
     if (packet.kind === 'input' && isInput(packet.input)) {
-      remoteJump ||= packet.input.jump && !remoteInput.jump;
-      remoteAttack ||= packet.input.attack && !remoteInput.attack;
+      remoteJump ||= packet.jumpPressed === true || (packet.input.jump && !remoteInput.jump);
+      remoteAttack ||= packet.attackPressed === true || (packet.input.attack && !remoteInput.attack);
       remoteInput = packet.input;
     } else if (
       packet.kind === 'rematch' &&
@@ -555,6 +626,9 @@ function receive(session: PeerSession, data: unknown): void {
   } else if (isFrame(packet) && (!match || packet.round >= match.round)) {
     if (packet.stakeKey && !stakes.canPlay(packet.stakeKey)) return;
     if (packet.round !== match?.round) {
+      localJump = false;
+      localAttack = false;
+      predictedGuestX = null;
       rematchRequested = false;
       ui.rematch.disabled = false;
     }
@@ -588,6 +662,7 @@ function renderPublicRooms(): void {
   const online = directoryState === 'online';
   const canPlay = online && directory?.hasNickname === true;
   ui.createPublic.disabled = !canPlay;
+  ui.create.disabled = !canPlay;
   const unavailable =
     directoryState === 'unsupported'
       ? 'Общее лобби доступно в браузере на HTTPS или при открытии HTML-файла.'
@@ -686,6 +761,8 @@ function connectDirectory(): void {
           ui.publicWaitMessage,
           state === 'online' ? 'Комната видна в общем лобби.' : 'Восстанавливаем связь с общим лобби…',
         );
+      } else if (publicAttempt?.role === 'host' && publicAttempt.privateCode && !publicAttempt.guest) {
+        showPrivateWait(publicAttempt.privateCode);
       }
     },
     onRooms(rooms) {
@@ -730,8 +807,27 @@ function openPublicWait(attempt: PublicAttempt, title: string, text: string): vo
   setText(ui.publicWaitMessage, text);
   setText(ui.publicWaitRoomId, attempt.roomId);
   ui.publicWaitRoomId.hidden = false;
+  ui.privateShare.hidden = true;
   connection('Общее лобби', 'pending');
   message('');
+}
+
+function showPrivateWait(code: string): void {
+  const online = directoryState === 'online';
+  const asLink = canShareLink();
+  setText(ui.publicWaitTitle, 'Закрытая комната');
+  setText(
+    ui.publicWaitMessage,
+    online
+      ? `Отправьте ${asLink ? 'ссылку' : 'код'} другу. Игра начнётся, когда он подключится.`
+      : 'Восстанавливаем связь с лобби…',
+  );
+  setText(ui.privateShareLabel, asLink ? 'Ссылка для друга' : 'Код для друга');
+  setText(ui.privateShareCopy, asLink ? 'Скопировать ссылку' : 'Скопировать код');
+  ui.privateShareValue.value = asLink ? inviteLink(code) : code;
+  ui.privateShare.hidden = false;
+  ui.publicWaitRoomId.hidden = true;
+  ui.privateShareCopy.disabled = !online;
 }
 
 type ChallengeKind = 'challenge' | 'challenge-accept' | 'challenge-decline' | 'challenge-cancel';
@@ -923,18 +1019,62 @@ async function createPublicRoom(): Promise<void> {
   }
 }
 
-async function joinPublicRoom(room: PublicRoom): Promise<void> {
-  if (!nickname || peer || publicAttempt || challenge || !directory?.hasNickname) return;
+function createPrivateRoom(): void {
+  if (!nickname || peer || publicAttempt || challenge) return;
+  const host = directory?.identity;
+  if (!host || !directory?.hasNickname) {
+    message('Ждём подключения к лобби. Попробуйте ещё раз.', true);
+    return;
+  }
+  const roomId = createRoomId();
+  const code = privateInviteCode(roomId, host);
+  openPublicWait(
+    { role: 'host', roomId, nickname, listed: false, privateCode: code, guest: null, awaitingAnswer: false },
+    'Закрытая комната',
+    '',
+  );
+  showPrivateWait(code);
+  ui.privateShareCopy.focus();
+}
+
+async function joinPublicRoom(room: PublicRoom, privateRoom = false): Promise<void> {
+  if (!nickname || peer || publicAttempt || challenge) return;
+  if (!directory?.hasNickname) {
+    if (privateRoom) showPrivateJoinError('Ждём подключения к лобби. Попробуйте ещё раз.');
+    return;
+  }
+  if (directory.identity && sameIdentity(directory.identity, room.host)) {
+    if (privateRoom) showPrivateJoinError('Это ваше приглашение. Отправьте его другу.');
+    return;
+  }
   const requestId = createRoomId();
-  const attempt: PublicAttempt = { role: 'guest', roomId: room.id, host: { identity: room.host, requestId } };
-  openPublicWait(attempt, 'Подключаемся', 'Ждём ответа создателя комнаты.');
-  publicTimer = window.setTimeout(() => {
-    if (publicAttempt === attempt && !linkOpen) {
-      closeRoom('Комната не ответила. Выберите другую или попробуйте ещё раз.', true, true);
-    }
-  }, 42_000);
+  const attempt: PublicAttempt = {
+    role: 'guest',
+    roomId: room.id,
+    host: { identity: room.host, requestId },
+    privateRoom,
+  };
+  openPublicWait(
+    attempt,
+    privateRoom ? 'Входим в закрытую комнату' : 'Подключаемся',
+    privateRoom ? 'Связываемся с создателем комнаты…' : 'Ждём ответа создателя комнаты.',
+  );
+  if (privateRoom) ui.publicWaitRoomId.hidden = true;
+  publicTimer = window.setTimeout(
+    () => {
+      if (publicAttempt !== attempt || linkOpen) return;
+      closeRoom(
+        privateRoom
+          ? 'Комната не ответила. Убедитесь, что друг оставил её открытой, и попробуйте снова.'
+          : 'Комната не ответила. Выберите другую или попробуйте ещё раз.',
+        true,
+        true,
+      );
+    },
+    privateRoom ? 14_000 : 42_000,
+  );
   try {
-    await directory.send(room.host, { kind: 'request', roomId: room.id, requestId });
+    await directory.send(room.host, { kind: privateRoom ? 'private-request' : 'request', roomId: room.id, requestId });
   } catch (error) {
     if (publicAttempt === attempt) closeRoom(errorText(error), true, true);
   }
@@ -954,6 +1094,12 @@ async function reopenPublicRoom(attempt: Extract<PublicAttempt, { role: 'host' }
   peer = null;
   closing?.close();
   if (admission) sendPublicNotice(admission, attempt.roomId, 'reject');
+  if (attempt.privateCode) {
+    showPrivateWait(attempt.privateCode);
+    connection('Ждём соперника', 'pending');
+    message(note, note !== '');
+    return;
+  }
   setText(ui.publicWaitTitle, 'Ждём соперника');
   setText(ui.publicWaitMessage, 'Публикуем комнату…');
   connection('Общее лобби', 'pending');
@@ -981,12 +1127,14 @@ async function admitPublicGuest(
   if (!rooms) return;
   attempt.guest = admission;
   if (attempt.listed) rooms.withdraw(attempt.roomId);
+  ui.privateShare.hidden = true;
   setText(ui.publicWaitTitle, 'Соперник найден');
   setText(ui.publicWaitMessage, 'Устанавливаем прямое соединение…');
   message('');
   publicTimer = window.setTimeout(() => {
     if (publicAttempt !== attempt || attempt.guest !== admission) return;
-    if (attempt.listed) void reopenPublicRoom(attempt, 'Подключение заняло слишком много времени.');
+    if (attempt.listed || attempt.privateCode)
+      void reopenPublicRoom(attempt, 'Подключение заняло слишком много времени.');
     else closeRoom('Подключение заняло слишком много времени.', true, true);
   }, 38_000);
   try {
@@ -1002,17 +1150,25 @@ async function admitPublicGuest(
     });
   } catch (error) {
     if (publicAttempt !== attempt || attempt.guest !== admission) return;
-    if (attempt.listed) await reopenPublicRoom(attempt, errorText(error));
+    if (attempt.listed || attempt.privateCode) await reopenPublicRoom(attempt, errorText(error));
     else closeRoom(errorText(error), true, true);
   }
 }
 
 async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal): Promise<void> {
   const attempt = publicAttempt;
+  if (
+    signal.kind === 'private-request' &&
+    (attempt?.role !== 'host' || !attempt.privateCode || signal.roomId !== attempt.roomId)
+  ) {
+    sendPublicNotice({ identity: sender, requestId: signal.requestId }, signal.roomId, 'reject');
+    return;
+  }
   if (!attempt || signal.roomId !== attempt.roomId) return;
+  const requestsRoom = signal.kind === 'request' || signal.kind === 'private-request';
   if (mode !== 'idle') {
     const opponent = opponentInRoom(attempt);
-    if (attempt.role === 'host' && signal.kind === 'request') {
+    if (attempt.role === 'host' && requestsRoom) {
       sendPublicNotice({ identity: sender, requestId: signal.requestId }, attempt.roomId, 'reject');
     } else if (
       opponent &&
@@ -1024,8 +1180,8 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
     }
     return;
   }
-  if (attempt.role === 'host' && signal.kind === 'request') {
-    if (!attempt.listed) return;
+  if (attempt.role === 'host' && requestsRoom) {
+    if (signal.kind === 'request' && !attempt.listed) return;
     await admitPublicGuest(attempt, { identity: sender, requestId: signal.requestId });
     return;
   }
@@ -1036,16 +1192,27 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
   try {
     if (attempt.role === 'host') {
       if (signal.kind === 'cancel') {
-        if (attempt.listed) await reopenPublicRoom(attempt, '');
+        if (attempt.listed || attempt.privateCode) await reopenPublicRoom(attempt, '');
         else closeRoom('Соперник отменил подключение.');
       } else if (signal.kind === 'answer' && peer && attempt.awaitingAnswer) {
         attempt.awaitingAnswer = false;
         await peer.acceptAnswer(signal.code);
       }
     } else if (signal.kind === 'reject') {
-      closeRoom('Соперник закрыл комнату или отменил подключение.', true);
+      closeRoom(
+        attempt.privateRoom
+          ? 'Комната закрыта или занята. Попросите друга прислать новое приглашение.'
+          : 'Соперник закрыл комнату или отменил подключение.',
+        true,
+      );
     } else if (signal.kind === 'invite' && !peer && directory) {
       if (readInviteRoomId(signal.code) !== attempt.roomId) throw new Error('Приглашение относится к другой комнате.');
+      if (attempt.privateRoom) {
+        window.clearTimeout(publicTimer);
+        publicTimer = window.setTimeout(() => {
+          if (publicAttempt === attempt && !linkOpen) closeRoom('Прямое подключение не удалось.', true, true);
+        }, 30_000);
+      }
       const session = attachPeer('guest', true);
       setText(ui.publicWaitMessage, 'Устанавливаем прямое соединение…');
       const code = await session.acceptInvite(signal.code);
@@ -1054,7 +1221,7 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
     }
   } catch (error) {
     if (publicAttempt !== attempt) return;
-    if (attempt.role === 'host' && attempt.guest === admission && attempt.listed) {
+    if (attempt.role === 'host' && attempt.guest === admission && (attempt.listed || attempt.privateCode)) {
       await reopenPublicRoom(attempt, errorText(error));
     } else {
       closeRoom(errorText(error), true, true);
@@ -1062,19 +1229,61 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
   }
 }
 
-async function openRoom(role: PeerRole): Promise<void> {
+async function joinInvite(text: string): Promise<void> {
+  clearPrivateJoinError();
+  message('');
+  try {
+    const code = inviteFrom(text);
+    const room = readPrivateInvite(code);
+    if (room) {
+      await joinPublicRoom(room, true);
+    } else {
+      readInviteRoomId(code);
+      await openManualRoom('guest', code);
+    }
+  } catch (error) {
+    showPrivateJoinError(errorText(error));
+  }
+}
+
+function showPrivateJoinError(text: string): void {
+  ui.manualConnection.open = true;
+  setText(ui.privateJoinError, text);
+  ui.invite.setAttribute('aria-invalid', 'true');
+  ui.invite.focus();
+}
+
+function clearPrivateJoinError(): void {
+  setText(ui.privateJoinError, '');
+  ui.invite.removeAttribute('aria-invalid');
+}
+
+async function joinSharedInvite(): Promise<void> {
+  const code = sharedInvite;
+  if (!code || !nickname || checkingNickname || ui.layout.hidden) return;
+  sharedInvite = null;
+  const url = new URL(location.href);
+  const params = new URLSearchParams(url.hash.slice(1));
+  params.delete('invite');
+  url.hash = params.toString();
+  if (location.protocol !== 'file:') history.replaceState(history.state, '', url);
+  ui.manualConnection.open = true;
+  ui.invite.value = code;
+  if (peer || publicAttempt || challenge) {
+    message('Покиньте текущую комнату, чтобы войти по новому приглашению.');
+    return;
+  }
+  await joinInvite(code);
+}
+
+async function openManualRoom(role: PeerRole, invite = ''): Promise<void> {
   if (!nickname || peer || publicAttempt || challenge) return;
   if (!directory?.hasNickname) {
     message('Ждём подключения к общему лобби для проверки никнейма.', true);
     return;
   }
-  let invite = '';
   let session: PeerSession | undefined;
   try {
-    if (role === 'guest') {
-      invite = inviteFrom(ui.invite.value);
-      readInviteRoomId(invite);
-    }
     session = attachPeer(role, ui.useStun.checked);
     resetMatch();
 
@@ -1136,13 +1345,15 @@ async function acceptAnswer(): Promise<void> {
 }
 
 async function copyCode(asLink: boolean): Promise<void> {
-  let value = ui.outgoing.value;
-  if (!value) return;
-  if (asLink) {
-    const url = new URL(location.href);
-    url.hash = new URLSearchParams({ invite: value }).toString();
-    value = url.href;
-  }
+  const value = ui.outgoing.value;
+  if (value) await copyInvite(asLink ? inviteLink(value) : value, ui.outgoing, asLink);
+}
+
+async function copyInvite(
+  value: string,
+  field: HTMLInputElement | HTMLTextAreaElement,
+  asLink: boolean,
+): Promise<void> {
   try {
     await navigator.clipboard.writeText(value);
   } catch {
@@ -1155,9 +1366,9 @@ async function copyCode(asLink: boolean): Promise<void> {
     const copied = document.execCommand('copy');
     temporary.remove();
     if (!copied) {
-      ui.outgoing.focus();
-      ui.outgoing.select();
-      message('Скопируйте выделенный код вручную.');
+      field.focus();
+      field.select();
+      message(asLink ? 'Скопируйте выделенную ссылку вручную.' : 'Скопируйте выделенный код вручную.');
       return;
     }
   }
@@ -1169,8 +1380,30 @@ function keyInput(): Input {
   for (const [key, action] of Object.entries(keyboardActions)) {
     if (keys.has(key)) input[action] = true;
   }
-  for (const { action } of touchActions.values()) input[action] = true;
+  for (const { button } of touchActions.values()) {
+    if (button) input[button.dataset.action as keyof Input] = true;
+  }
   return input;
+}
+
+function inputPressed(action: keyof Input): void {
+  if (!match || match.countdown > 0 || match.game.winner !== null) return;
+  if (action === 'jump') localJump = true;
+  if (action === 'attack') localAttack = true;
+}
+
+function sendGuestInput(): void {
+  if (mode !== 'guest' || !linkOpen) return;
+  const input = keyInput();
+  const signature = JSON.stringify(input);
+  if (signature === sentInput && !localJump && !localAttack) return;
+  if (
+    peer?.send({ kind: 'input', input, jumpPressed: localJump || undefined, attackPressed: localAttack || undefined })
+  ) {
+    sentInput = signature;
+    localJump = false;
+    localAttack = false;
+  }
 }
 
 function flashKey(code: string): void {
@@ -1197,30 +1430,35 @@ function pressKey(event: KeyboardEvent): void {
   if (!linkOpen || stakes.isOpen) return;
 
   event.preventDefault();
+  if (keys.has(event.code)) return;
+  inputPressed(keyboardActions[event.code as keyof typeof keyboardActions]);
   keys.add(event.code);
+  sendGuestInput();
 }
 
 function simulate(): void {
   if (mode === 'idle' || !linkOpen) return;
   if (mode === 'guest') {
-    const input = keyInput();
-    const signature = JSON.stringify(input);
-    if (signature !== sentInput && peer?.send({ kind: 'input', input })) sentInput = signature;
+    sendGuestInput();
     return;
   }
   if (!match) return;
 
   if (match.countdown > 0) {
     match.countdown -= 1;
+    remoteJump = false;
+    remoteAttack = false;
     matchDirty = true;
   } else if (match.game.winner === null) {
-    const first = keyInput();
+    const first = { ...keyInput(), jumpPressed: localJump, attackPressed: localAttack };
     const second = {
       ...remoteInput,
-      jump: remoteInput.jump || remoteJump,
-      attack: remoteInput.attack || remoteAttack,
+      jumpPressed: remoteJump,
+      attackPressed: remoteAttack,
     };
     game.step([first, second]);
+    localJump = false;
+    localAttack = false;
     remoteJump = false;
     remoteAttack = false;
     if (match.game.winner === 0 || match.game.winner === 1) match.scores[match.game.winner] += 1;
@@ -1228,9 +1466,32 @@ function simulate(): void {
     matchDirty = true;
   }
   snapshotTick += 1;
-  if (matchDirty && snapshotTick % 2 === 0 && peer?.send(match)) {
+  if (matchDirty && (match.countdown === 0 || snapshotTick % 2 === 0) && peer?.send(match, 2_048)) {
     matchDirty = false;
   }
+}
+
+function renderGame(elapsed: number): GameState {
+  const state = match?.game ?? game.state;
+  const [host, guest] = state.fighters;
+  if (mode !== 'guest' || !linkOpen || !match || match.countdown > 0 || state.winner !== null) {
+    predictedGuestX = null;
+    return state;
+  }
+  if (guest.hitTicks || guest.blockHitTicks || guest.attackTicks || guest.blocking) {
+    predictedGuestX = guest.x;
+    return state;
+  }
+
+  const input = keyInput();
+  const previousX = predictedGuestX ?? guest.x;
+  const ticks = elapsed / tickMs;
+  const moving = !input.block && input.left !== input.right;
+  const x = moving
+    ? predictWalk(guest, host, previousX, input, ticks)
+    : previousX + (guest.x - previousX) * Math.min(1, elapsed / 30);
+  predictedGuestX = x;
+  return { ...state, fighters: [host, { ...guest, x, moving: moving && x !== previousX }] };
 }
 
 function updateScreen(): void {
@@ -1258,7 +1519,7 @@ function updateScreen(): void {
   } else if (match.countdown > 0) {
     overlay(String(Math.ceil(match.countdown / TICK_RATE)), `РАУНД ${match.round}`, '');
   } else if (state.winner !== null) {
-    const winner = state.winner === 'draw' ? 'Ничья' : `${fighters[state.winner]} победил`;
+    const winner = state.winner === 'draw' ? 'Ничья' : `Победа · ${fighterNames()[state.winner]}`;
     const reason = seconds === 0 ? 'Время вышло' : 'Нокаут';
     overlay(
       winner,
@@ -1286,13 +1547,15 @@ ui.declineChallenge.addEventListener('click', () => closeRoom('Вызов отк
 ui.createPublic.addEventListener('click', () => {
   void createPublicRoom();
 });
-ui.create.addEventListener('click', () => {
-  void openRoom('host');
+ui.create.addEventListener('click', createPrivateRoom);
+ui.createManual.addEventListener('click', () => {
+  void openManualRoom('host');
 });
 ui.join.addEventListener('submit', (event) => {
   event.preventDefault();
-  void openRoom('guest');
+  void joinInvite(ui.invite.value);
 });
+ui.invite.addEventListener('input', clearPrivateJoinError);
 ui.answerForm.addEventListener('submit', (event) => {
   event.preventDefault();
   void acceptAnswer();
@@ -1302,6 +1565,9 @@ ui.copy.addEventListener('click', () => {
 });
 ui.copyLink.addEventListener('click', () => {
   void copyCode(true);
+});
+ui.privateShareCopy.addEventListener('click', () => {
+  void copyInvite(ui.privateShareValue.value, ui.privateShareValue, canShareLink());
 });
 ui.leave.addEventListener('click', () => closeRoom('', false, true));
 ui.mobileLeave.addEventListener('click', () => closeRoom('', false, true));
@@ -1324,7 +1590,7 @@ ui.rematch.addEventListener('click', () => {
 
 document.addEventListener('keydown', pressKey);
 document.addEventListener('keyup', (event) => {
-  keys.delete(event.code);
+  if (keys.delete(event.code)) sendGuestInput();
 });
 window.addEventListener('blur', clearLocalInputs);
 document.addEventListener('visibilitychange', clearLocalInputs);
@@ -1341,30 +1607,72 @@ window.addEventListener('pageshow', (event) => {
   showNicknameScreen(previous ?? '');
   if (previous) void claimNickname(previous);
 });
-
-for (const button of ui.touch.querySelectorAll<HTMLButtonElement>('button[data-action]')) {
-  const action = button.dataset.action as keyof Input;
-  button.addEventListener('pointerdown', (event) => {
-    if (!linkOpen || event.button !== 0) return;
-    event.preventDefault();
-    button.setPointerCapture(event.pointerId);
-    touchActions.set(event.pointerId, { action, button });
-    button.classList.add('is-pressed');
-  });
-  function release(event: PointerEvent): void {
-    touchActions.delete(event.pointerId);
-    const stillPressed = Array.from(touchActions.values()).some((touch) => touch.button === button);
-    if (!stillPressed) button.classList.remove('is-pressed');
+window.addEventListener('hashchange', () => {
+  sharedInvite = new URLSearchParams(location.hash.slice(1)).get('invite');
+  if (nickname) {
+    void joinSharedInvite();
+  } else {
+    setText(ui.nicknameSubmit, sharedInvite ? 'Войти по приглашению' : 'Войти в лобби');
   }
-  button.addEventListener('pointerup', release);
-  button.addEventListener('pointercancel', release);
-  button.addEventListener('lostpointercapture', release);
+});
+
+function touchButton(node: Element | null): HTMLButtonElement | null {
+  return node?.closest<HTMLButtonElement>('button[data-action]') ?? null;
 }
 
-const sharedInvite = new URLSearchParams(location.hash.slice(1)).get('invite');
+function updateTouch(
+  pointer: { cluster: Element; button: HTMLButtonElement | null },
+  button: HTMLButtonElement | null,
+): void {
+  const previous = pointer.button;
+  if (previous === button) return;
+  const wasHeld = Array.from(touchActions.values()).some((touch) => touch.button === button);
+  pointer.button = button;
+  if (previous && !Array.from(touchActions.values()).some((touch) => touch.button === previous)) {
+    previous.classList.remove('is-pressed');
+  }
+  if (button) {
+    button.classList.add('is-pressed');
+    if (!wasHeld) inputPressed(button.dataset.action as keyof Input);
+  }
+  sendGuestInput();
+}
+
+ui.touch.addEventListener('pointerdown', (event) => {
+  if (!linkOpen || stakes.isOpen || event.button !== 0 || !(event.target instanceof Element)) return;
+  const button = touchButton(event.target);
+  const cluster = button?.closest('.touch-cluster');
+  if (!button || !cluster) return;
+  event.preventDefault();
+  button.setPointerCapture(event.pointerId);
+  const pointer = { cluster, button: null };
+  touchActions.set(event.pointerId, pointer);
+  updateTouch(pointer, button);
+});
+
+ui.touch.addEventListener('pointermove', (event) => {
+  const pointer = touchActions.get(event.pointerId);
+  if (!pointer) return;
+  const button = touchButton(document.elementFromPoint(event.clientX, event.clientY));
+  updateTouch(pointer, pointer.cluster.contains(button) ? button : null);
+});
+
+function releaseTouch(event: PointerEvent): void {
+  const pointer = touchActions.get(event.pointerId);
+  if (!pointer) return;
+  updateTouch(pointer, null);
+  touchActions.delete(event.pointerId);
+}
+
+ui.touch.addEventListener('pointerup', releaseTouch);
+ui.touch.addEventListener('pointercancel', releaseTouch);
+ui.touch.addEventListener('lostpointercapture', releaseTouch);
+ui.touch.addEventListener('contextmenu', (event) => {
+  if (event.target instanceof Element && touchButton(event.target)) event.preventDefault();
+});
+
 if (sharedInvite) {
-  ui.manualConnection.open = true;
-  ui.invite.value = sharedInvite;
+  setText(ui.nicknameSubmit, 'Войти по приглашению');
 }
 const previousNickname = storedNickname();
 if (previousNickname) {
@@ -1375,14 +1683,15 @@ if (previousNickname) {
 let lastTime = performance.now();
 let accumulated = 0;
 function animate(time: number): void {
-  accumulated += Math.min(100, Math.max(0, time - lastTime));
+  const elapsed = Math.min(100, Math.max(0, time - lastTime));
+  accumulated += elapsed;
   lastTime = time;
   while (accumulated >= tickMs) {
     simulate();
     accumulated -= tickMs;
   }
   if (!ui.layout.hidden) {
-    renderer.draw(match?.game ?? game.state, time);
+    renderer.draw(renderGame(elapsed), time);
     updateScreen();
   }
   requestAnimationFrame(animate);

@@ -65,9 +65,11 @@
             <div class="fighter-hud fighter-hud-left">
               <div class="fighter-info">
                 <span class="fighter-slot">P1</span>
-                <strong class="fighter-name">RUST</strong>
+                <strong id="p1-name" class="fighter-name" dir="auto">Вы</strong>
                 <span class="mobile-you" aria-hidden="true">Вы</span>
-                <span class="fighter-hp"><span class="sr-only">Здоровье Rust </span><span id="p1-hp">100</span></span>
+                <span class="fighter-hp">
+                  <span id="p1-health-label" class="sr-only">Здоровье </span><span id="p1-hp">100</span>
+                </span>
               </div>
               <div class="health-track" aria-hidden="true"><div id="p1-health" class="health-fill"></div></div>
             </div>
@@ -82,16 +84,18 @@
             <div class="fighter-hud fighter-hud-right">
               <div class="fighter-info">
                 <span class="fighter-slot">P2</span>
-                <strong class="fighter-name">VOLT</strong>
+                <strong id="p2-name" class="fighter-name" dir="auto">Соперник</strong>
                 <span class="mobile-you" aria-hidden="true">Вы</span>
-                <span class="fighter-hp"><span class="sr-only">Здоровье Volt </span><span id="p2-hp">100</span></span>
+                <span class="fighter-hp">
+                  <span id="p2-health-label" class="sr-only">Здоровье </span><span id="p2-hp">100</span>
+                </span>
               </div>
               <div class="health-track" aria-hidden="true"><div id="p2-health" class="health-fill"></div></div>
             </div>
           </div>
 
           <div class="stage">
-            <canvas id="arena" width="960" height="440" aria-label="Арена боя между Rust и Volt">
+            <canvas id="arena" width="960" height="440" aria-label="Арена боя">
               Для игры нужен браузер с поддержкой Canvas.
             </canvas>
             <div id="arena-overlay" class="arena-overlay">
@@ -112,7 +116,6 @@
               <button type="button" class="touch-key touch-key-direction" data-action="right" aria-label="Вправо">
                 →
               </button>
-              <button type="button" class="touch-key" data-action="jump">Прыжок</button>
             </div>
             <div class="mobile-match-actions">
               <button
@@ -145,8 +148,10 @@
               </button>
             </div>
             <div class="touch-cluster touch-cluster-combat">
+              <button type="button" class="touch-key touch-key-jump" data-action="jump">Прыжок</button>
               <button type="button" class="touch-key touch-key-block" data-action="block">Блок</button>
               <button type="button" class="touch-key touch-key-attack" data-action="attack">Удар</button>
+              <p class="touch-combo-guide">Два удара подряд<br />Вперёд + удар<br />Удар в прыжке</p>
             </div>
           </div>
 
@@ -173,6 +178,9 @@
                 <dd>Удар</dd>
               </div>
             </dl>
+            <p class="combo-guide">
+              F → F · двойной удар <span>Вперёд + F · выпад</span> <span>W → F · удар в прыжке</span>
+            </p>
           </section>
         </section>
 
@@ -192,18 +200,68 @@
                 <strong id="player-nickname" dir="auto"></strong>
               </div>
               <div class="lobby-profile-wallet">
-                <span>Тестовый баланс</span>
-                <strong id="lobby-wallet-balance" dir="ltr">—</strong>
+                <span>Тестовый ETH</span>
+                <strong id="lobby-wallet-balance" dir="ltr" hidden>—</strong>
+                <span id="lobby-wallet-status">Кошелёк не подключён</span>
               </div>
-              <button id="edit-nickname" class="button button-secondary" type="button" aria-label="Изменить никнейм">
-                Изменить
-              </button>
-              <button id="lobby-wallet-connect" class="button button-secondary" type="button">
-                Подключить кошелёк
-              </button>
-              <button id="lobby-wallet-topup" class="button button-secondary" type="button" hidden>Пополнить</button>
+              <div class="lobby-profile-actions">
+                <button id="edit-nickname" class="button button-secondary" type="button" aria-label="Изменить никнейм">
+                  Изменить
+                </button>
+                <button id="lobby-wallet-connect" class="button button-secondary" type="button">
+                  Подключить кошелёк
+                </button>
+                <button id="lobby-wallet-topup" class="button button-secondary" type="button" hidden>Пополнить</button>
+                <button
+                  id="stake-recovery-open"
+                  class="button button-secondary"
+                  type="button"
+                  aria-haspopup="dialog"
+                  hidden
+                >
+                  Кошелёк
+                </button>
+              </div>
               <p id="lobby-wallet-feedback" class="lobby-wallet-feedback" role="status" hidden></p>
             </div>
+            <section class="manual-connection" aria-labelledby="private-room-title">
+              <h3 id="private-room-title">Закрытая комната</h3>
+              <div class="manual-connection-body">
+                <button id="create-room" class="button button-secondary" type="button" disabled>
+                  Пригласить друга
+                </button>
+                <details id="manual-connection">
+                  <summary>Войти по приглашению</summary>
+                  <form id="join-form" class="lobby-form">
+                    <label for="invite-input">Ссылка или код от друга</label>
+                    <input
+                      id="invite-input"
+                      type="text"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      enterkeyhint="go"
+                      spellcheck="false"
+                      aria-describedby="private-join-error"
+                      required
+                    />
+                    <p id="private-join-error" class="lobby-description" role="alert"></p>
+                    <button class="button button-secondary" type="submit">Войти в комнату</button>
+                  </form>
+                </details>
+                <details class="private-manual">
+                  <summary>Ручное подключение</summary>
+                  <div class="lobby-options">
+                    <label class="option-label">
+                      <input id="use-stun" type="checkbox" checked />
+                      <span>Искать адрес для подключения через интернет</span>
+                    </label>
+                    <button id="create-manual-room" class="button button-secondary" type="button">
+                      Создать ручной код
+                    </button>
+                  </div>
+                </details>
+              </div>
+            </section>
             <section class="online-directory" aria-labelledby="online-title">
               <h3 id="online-title">Игроки онлайн</h3>
               <p id="online-status" class="public-status" role="status">Подключаемся к общему лобби…</p>
@@ -217,42 +275,6 @@
               <p id="public-status" class="public-status" role="status">Подключаемся к общему лобби…</p>
               <ul id="public-rooms" class="public-rooms"></ul>
             </section>
-            <details id="manual-connection" class="manual-connection">
-              <summary>Закрытая дуэль по коду</summary>
-              <div class="manual-connection-body">
-                <button id="create-room" class="button button-secondary" type="button">Создать приглашение</button>
-                <div class="lobby-divider" aria-hidden="true"><span>или</span></div>
-                <form id="join-form" class="lobby-form">
-                  <label for="invite-input">Код приглашения</label>
-                  <textarea
-                    id="invite-input"
-                    rows="2"
-                    placeholder="Вставьте код или ссылку"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    required
-                  ></textarea>
-                  <button class="button button-secondary" type="submit">Присоединиться</button>
-                </form>
-                <div class="lobby-options">
-                  <label class="option-label">
-                    <input id="use-stun" type="checkbox" checked aria-describedby="stun-description" />
-                    <span>Помощь при подключении через интернет</span>
-                  </label>
-                  <p id="stun-description">STUN определяет внешний адрес. В одной сети можно отключить.</p>
-                </div>
-              </div>
-            </details>
-            <button
-              id="stake-recovery-open"
-              class="button button-secondary stake-lobby-button"
-              type="button"
-              aria-haspopup="dialog"
-              hidden
-            >
-              Кошелёк и ставки
-            </button>
           </div>
 
           <div id="lobby-challenge" class="lobby-step" hidden>
@@ -268,6 +290,11 @@
             <h3 id="public-wait-title"></h3>
             <p id="public-wait-message" class="lobby-description" role="status"></p>
             <code id="public-wait-room-id" class="room-id" aria-label="UUID комнаты" hidden></code>
+            <div id="private-share" class="lobby-form" hidden>
+              <label id="private-share-label" for="private-share-value">Приглашение</label>
+              <input id="private-share-value" type="text" readonly spellcheck="false" />
+              <button id="private-share-copy" class="button button-primary" type="button"></button>
+            </div>
           </div>
 
           <div id="lobby-exchange" class="lobby-step" hidden>
@@ -281,15 +308,16 @@
             </div>
             <form id="answer-form" class="lobby-form answer-form" hidden>
               <label for="answer-input">Код ответа от друга</label>
-              <textarea
+              <input
                 id="answer-input"
-                rows="2"
+                type="text"
                 placeholder="Вставьте код ответа"
                 autocomplete="off"
                 autocapitalize="off"
+                enterkeyhint="go"
                 spellcheck="false"
                 required
-              ></textarea>
+              />
               <button id="accept-answer" class="button button-secondary" type="submit">Подключить друга</button>
             </form>
           </div>
@@ -347,12 +375,15 @@
         aria-labelledby="stake-title"
         hidden
       >
-        <div class="stake-card">
+        <form id="stake-form" class="stake-card">
           <header class="stake-header">
             <h2 id="stake-title">Тестовая ставка</h2>
             <button id="stake-close" class="button button-secondary" type="button">Закрыть</button>
           </header>
-          <p id="stake-terms" class="stake-terms">Ставки принимаются в тестовых ETH.</p>
+          <div class="stake-context">
+            <p id="stake-network" class="stake-terms"></p>
+            <code id="stake-account" dir="ltr" hidden></code>
+          </div>
           <dl id="stake-balances" class="stake-balances" aria-label="Баланс">
             <div>
               <dt>В кошельке</dt>
@@ -363,32 +394,38 @@
               <dd id="stake-withdrawable-balance">—</dd>
             </div>
           </dl>
+          <p id="stake-terms" class="stake-terms"></p>
           <div id="stake-amount-field" class="stake-field" hidden>
-            <label for="stake-amount">Ставка игрока в тестовых ETH</label>
+            <label for="stake-amount">Сумма с каждого игрока, ETH</label>
             <input
               id="stake-amount"
               type="text"
               inputmode="decimal"
+              enterkeyhint="send"
               autocomplete="off"
               maxlength="24"
-              placeholder="0.01"
+              placeholder="0,00001"
+              aria-describedby="stake-amount-hint"
             />
+            <p id="stake-amount-hint" class="stake-terms">Оставьте часть баланса на комиссию сети.</p>
           </div>
           <div id="stake-result-field" class="stake-field" hidden>
             <label for="stake-result">Результат раунда</label>
             <select id="stake-result">
               <option value="">Выберите итог</option>
-              <option value="1">Победил RUST</option>
-              <option value="2">Победил VOLT</option>
+              <option value="1" id="stake-result-host">Создатель комнаты</option>
+              <option value="2" id="stake-result-guest">Соперник</option>
               <option value="3">Ничья</option>
             </select>
           </div>
           <p id="stake-note" class="stake-note" role="status" aria-live="polite"></p>
           <div class="stake-actions">
-            <button id="stake-primary" class="button button-primary" type="button" hidden></button>
+            <button id="stake-primary" class="button button-primary" type="submit" hidden></button>
             <button id="stake-secondary" class="button button-secondary" type="button" hidden></button>
+            <button id="stake-history" class="button button-secondary" type="button" hidden></button>
+            <button id="stake-wallet-back" class="button button-secondary" type="button" hidden>К кошельку</button>
           </div>
-        </div>
+        </form>
       </section>
     </div>
     <script type="module" src="/src/main.ts"></script>

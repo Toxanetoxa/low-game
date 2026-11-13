@@ -18,7 +18,9 @@ type Options = {
   send: (packet: unknown) => boolean;
   startRound: (key: Hex) => void;
   clearInput: () => void;
+  fighterNames: () => readonly [string, string];
 };
+type PanelAction = readonly [label: string, run?: () => Promise<void>];
 
 const hexKey = /^0x[\da-f]{64}$/i;
 const sameAddress = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -33,11 +35,15 @@ function find<T extends HTMLElement>(id: string): T {
 export class Stakes {
   private readonly wallet = createStakeWallet();
   private readonly panel = find('stake-panel');
+  private readonly form = find<HTMLFormElement>('stake-form');
   private readonly title = find('stake-title');
   private readonly note = find('stake-note');
   private readonly terms = find('stake-terms');
+  private readonly network = find('stake-network');
+  private readonly walletAddress = find('stake-account');
   private readonly walletBalance = find('stake-wallet-balance');
   private readonly lobbyBalance = find('lobby-wallet-balance');
+  private readonly lobbyWalletStatus = find('lobby-wallet-status');
   private readonly lobbyConnect = find<HTMLButtonElement>('lobby-wallet-connect');
   private readonly lobbyTopUp = find<HTMLButtonElement>('lobby-wallet-topup');
   private readonly lobbyFeedback = find('lobby-wallet-feedback');
@@ -51,15 +57,20 @@ export class Stakes {
   private readonly amount = find<HTMLInputElement>('stake-amount');
   private readonly resultField = find('stake-result-field');
   private readonly result = find<HTMLSelectElement>('stake-result');
+  private readonly hostResult = find('stake-result-host');
+  private readonly guestResult = find('stake-result-guest');
   private readonly close = find<HTMLButtonElement>('stake-close');
   private readonly primary = find<HTMLButtonElement>('stake-primary');
   private readonly secondary = find<HTMLButtonElement>('stake-secondary');
+  private readonly history = find<HTMLButtonElement>('stake-history');
+  private readonly walletBack = find<HTMLButtonElement>('stake-wallet-back');
   private readonly recovery = find<HTMLButtonElement>('stake-recovery-open');
   private readonly triggers = [find<HTMLButtonElement>('stake-open'), find<HTMLButtonElement>('stake-mobile-open')];
   private session: Session | null = null;
   private account: Address | null = null;
   private viewed: StakeRecord | null = null;
   private busy = false;
+  private submitAction: (() => Promise<void>) | undefined;
   private trigger: HTMLElement | null = null;
   private error = '';
   private readonly storageKey: string;
@@ -69,10 +80,16 @@ export class Stakes {
 
   constructor(private readonly options: Options) {
     this.storageKey = `low-game.stakes.${this.wallet.chainId}.${this.wallet.address?.toLowerCase() ?? 'unconfigured'}`;
+    this.network.textContent = this.wallet.chainName;
     for (const trigger of this.triggers)
       trigger.addEventListener('click', () => this.open(trigger, this.session?.record ?? null));
-    this.recovery.addEventListener('click', () => this.open(this.recovery, this.saved().at(-1) ?? null));
+    this.recovery.addEventListener('click', () => this.open(this.recovery, null));
     this.close.addEventListener('click', () => this.hide());
+    this.walletBack.addEventListener('click', () => this.open(null, null));
+    this.form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (this.isOpen && !this.primary.hidden && this.submitAction) void this.run(this.submitAction);
+    });
     this.lobbyConnect.addEventListener('click', () => {
       void this.connectFromLobby();
     });
@@ -110,7 +127,7 @@ export class Stakes {
     window.setInterval(() => {
       if (this.lobbyVisible || this.session?.record || this.isOpen) void this.refresh();
     }, 2_500);
-    this.recovery.hidden = false;
+    this.showLobbyBalance(null);
   }
 
   get isOpen(): boolean {
@@ -289,6 +306,15 @@ export class Stakes {
     this.error = '';
     this.options.clearInput();
     this.showBalances(null, null);
+    this.amountField.hidden = true;
+    this.resultField.hidden = true;
+    this.action(this.primary, '');
+    this.action(this.secondary, '');
+    this.action(this.history, '');
+    this.walletBack.hidden = true;
+    this.terms.textContent = '';
+    this.note.dataset.state = '';
+    this.note.textContent = 'Обновляем данные кошелька…';
     this.panel.hidden = false;
     for (const id of ['game-header', 'game-layout', 'nickname-screen']) find(id).inert = true;
     this.close.focus();
@@ -305,8 +331,12 @@ export class Stakes {
 
   private action(button: HTMLButtonElement, label: string, run?: () => Promise<void>): void {
     button.hidden = !label;
-    button.textContent = label;
+    if (button.textContent !== label) button.textContent = label;
     button.disabled = this.busy;
+    if (button === this.primary) {
+      this.submitAction = run;
+      return;
+    }
     button.onclick = run
       ? () => {
           void this.run(run);
@@ -321,6 +351,8 @@ export class Stakes {
     this.error = '';
     this.primary.disabled = true;
     this.secondary.disabled = true;
+    this.history.disabled = true;
+    this.walletBack.disabled = true;
     this.note.dataset.state = '';
     this.note.textContent = 'Ждём подтверждения кошелька или сети…';
     try {
@@ -338,14 +370,21 @@ export class Stakes {
     const withdrawable = credit === null ? '—' : `${formatStake(credit)} ETH`;
     if (this.walletBalance.textContent !== wallet) this.walletBalance.textContent = wallet;
     if (this.withdrawableBalance.textContent !== withdrawable) this.withdrawableBalance.textContent = withdrawable;
+    this.walletAddress.hidden = this.account === null;
+    if (this.walletAddress.textContent !== (this.account ?? '')) this.walletAddress.textContent = this.account ?? '';
   }
 
   private showLobbyBalance(balance: bigint | null): void {
-    const value = balance === null ? '—' : `${formatStake(balance)} ETH`;
+    const value = balance === null ? (this.account ? '—' : '') : `${formatStake(balance)} ETH`;
     if (this.lobbyBalance.textContent !== value) this.lobbyBalance.textContent = value;
     this.lobbyBalance.title = balance === null ? this.wallet.chainName : `${value} · ${this.wallet.chainName}`;
+    this.lobbyBalance.hidden = !this.account;
+    const status = this.account ? this.wallet.chainName : 'Кошелёк не подключён';
+    if (this.lobbyWalletStatus.textContent !== status) this.lobbyWalletStatus.textContent = status;
+    this.lobbyWalletStatus.title = this.account ?? '';
     this.lobbyConnect.hidden = this.account !== null;
     this.lobbyTopUp.hidden = this.account === null;
+    this.recovery.hidden = !this.account && this.saved().length === 0;
   }
 
   private async connectFromLobby(): Promise<void> {
@@ -353,9 +392,10 @@ export class Stakes {
     this.busy = true;
     this.refreshVersion += 1;
     this.lobbyConnect.disabled = true;
-    this.lobbyMessage('');
+    this.lobbyMessage('Подтвердите подключение в кошельке.');
     try {
       await this.connectWallet();
+      this.lobbyMessage('');
     } catch (error) {
       this.lobbyMessage(error instanceof Error ? error.message : 'Не удалось подключить кошелёк.', true);
     } finally {
@@ -538,42 +578,47 @@ export class Stakes {
     const wallet = this.wallet;
     const session = this.session;
     const live = record && session?.record?.key === record.key ? session : null;
-    this.title.textContent = session ? 'Тестовая ставка' : 'Кошелёк и ставки';
-    this.terms.textContent = `${wallet.chainName} · тестовые ETH`;
-    this.amountField.hidden = true;
-    this.resultField.hidden = true;
-    this.action(this.primary, '');
-    this.action(this.secondary, '');
+    const showWallet = !session && !record;
+    this.title.textContent = showWallet
+      ? 'Тестовый кошелёк'
+      : live || !record
+        ? 'Ставка на дуэль'
+        : 'Сохранённая ставка';
     this.note.dataset.state = this.error || readError ? 'error' : '';
+    let terms = '';
     let note = '';
+    let showAmount = false;
+    let showResult = false;
+    let primary: PanelAction = [''];
+    let secondary: PanelAction = [''];
+    let history: PanelAction = [''];
 
     const account = this.account;
     if (!account) {
-      note = 'Подключите кошелёк в тестовой сети, чтобы увидеть баланс.';
-      this.action(this.primary, 'Подключить кошелёк', () => this.connectWallet());
+      note = 'Подключите кошелёк и подтвердите выбор сети в нём.';
+      primary = ['Подключить кошелёк', () => this.connectWallet()];
     } else if (!wallet.address) {
-      note = 'Тестовый контракт ставок не настроен.';
+      note = 'Ставки и вывод сейчас недоступны. Пополнить тестовый баланс можно в лобби.';
     } else if (record && !sameAddress(account, record.account)) {
-      note = 'Для этой ставки выберите в кошельке адрес, которым внесли взнос.';
+      note = 'Выберите в кошельке адрес, который использовали для этой ставки.';
     } else if (!record && session?.role === 'host' && session.opponent) {
-      this.amountField.hidden = false;
-      note =
-        'Оба вносят одинаковую сумму. После одного раунда подтвердите итог в кошельке. При разногласии, ничьей или тайм-ауте взносы возвращаются.';
-      this.action(this.primary, 'Внести и предложить', async () => this.create(session));
+      showAmount = true;
+      terms = 'Оба игрока вносят одинаковую сумму. Бой начнётся после двух взносов.';
+      primary = ['Предложить ставку и внести ETH', () => this.create(session)];
     } else if (!record) {
-      note = !session
-        ? ''
-        : session.role === 'host'
-          ? 'Ждём, пока соперник подключит кошелёк.'
-          : 'После подключения кошельков создатель комнаты сможет предложить сумму.';
+      note = showWallet
+        ? 'Пополняйте баланс в лобби. Предложить ставку можно после подключения соперника.'
+        : session?.role === 'host'
+          ? 'Сопернику нужно открыть «Тестовая ставка» и подключить кошелёк.'
+          : 'Кошелёк подключён. Создатель комнаты предложит сумму ставки.';
     } else if (!status) {
       note = 'Взнос ещё не найден в сети. Проверьте подтверждение транзакции в кошельке.';
       if (session?.role === 'host' && !session.record && session.opponent) {
-        this.amountField.hidden = false;
-        this.action(this.primary, 'Внести и предложить', async () => this.create(session));
+        showAmount = true;
+        primary = ['Предложить ставку и внести ETH', () => this.create(session)];
       }
     } else {
-      this.terms.textContent = `${formatStake(status.stake)} тестовых ETH с игрока · банк ${formatStake(status.stake * 2n)} ETH`;
+      terms = `${formatStake(status.stake)} ETH с игрока · банк ${formatStake(status.stake * 2n)} ETH`;
       const account = record.account;
       const deadline = status.funded ? status.settlementDeadline : status.fundingDeadline;
       if (status.outcome !== 0) {
@@ -585,15 +630,22 @@ export class Stakes {
               : 'Итог подтверждён. Банк начислен победителю.';
       } else if (time >= deadline) {
         note = 'Срок истёк. Можно вернуть взносы.';
-        this.action(this.primary, 'Вернуть ставки', async () => wallet.refund(account, record.key));
+        primary = ['Вернуть ставки', () => wallet.refund(account, record.key)];
       } else if (!status.funded && record.role === 'guest') {
-        note = 'Проверьте сумму. Ваш взнос подтверждается в кошельке.';
-        this.action(this.primary, 'Внести ставку', async () => {
-          if (!live || live !== this.session) throw new Error('Подключитесь к сопернику, чтобы внести ставку.');
-          await wallet.fundMatch(account, record.key, status.stake);
-          this.send('stake-update');
-          this.hide();
-        });
+        note = live
+          ? 'Создатель комнаты уже внёс ставку. Подтвердите свой взнос в кошельке, чтобы начать бой.'
+          : 'Чтобы внести ставку, снова подключитесь к сопернику.';
+        if (live) {
+          primary = [
+            'Принять и внести ставку',
+            async () => {
+              if (live !== this.session) throw new Error('Подключитесь к сопернику, чтобы внести ставку.');
+              await wallet.fundMatch(account, record.key, status.stake);
+              this.send('stake-update');
+              this.hide();
+            },
+          ];
+        }
       } else if (!status.funded) {
         note = 'Ваш взнос принят. Ждём взнос соперника.';
         if (live) this.send('stake-offer', { key: record.key });
@@ -602,32 +654,53 @@ export class Stakes {
         if (vote) {
           note = 'Ваш итог записан. Ждём подтверждения соперника или возврата по тайм-ауту.';
         } else {
-          this.resultField.hidden = false;
+          showResult = true;
+          const [host, guest] = this.options.fighterNames();
+          const hostLabel = live ? `Победа: ${host}` : record.role === 'host' ? 'Ваша победа' : 'Победа создателя';
+          const guestLabel = live ? `Победа: ${guest}` : record.role === 'guest' ? 'Ваша победа' : 'Победа соперника';
+          if (this.hostResult.textContent !== hostLabel) this.hostResult.textContent = hostLabel;
+          if (this.guestResult.textContent !== guestLabel) this.guestResult.textContent = guestLabel;
           if (this.result.dataset.selection !== record.key) this.result.value = live?.result ? String(live.result) : '';
           this.result.dataset.selection = record.key;
-          note = 'Выберите исход. Оба кошелька должны подтвердить один итог, чтобы контракт распределил банк.';
-          this.action(this.primary, 'Подтвердить итог', async () => {
-            const outcome = Number(this.result.value);
-            if (outcome !== 1 && outcome !== 2 && outcome !== 3) throw new Error('Выберите исход раунда.');
-            await wallet.confirmResult(account, record.key, outcome);
-            this.send('stake-update');
-          });
+          note = 'Подтвердите итог в кошельке. При ничьей или разных решениях ставки возвращаются.';
+          primary = [
+            'Подтвердить итог',
+            async () => {
+              const outcome = Number(this.result.value);
+              if (outcome !== 1 && outcome !== 2 && outcome !== 3) throw new Error('Выберите исход раунда.');
+              await wallet.confirmResult(account, record.key, outcome);
+              this.send('stake-update');
+            },
+          ];
         }
       } else {
         note = 'Оба взноса подтверждены. Сыграйте один раунд.';
       }
     }
     if (account && credit !== null && credit > 0n) {
-      this.action(this.secondary, `Вывести ${formatStake(credit)} ETH`, () => wallet.withdraw(account));
+      secondary = [`Вывести ${formatStake(credit)} ETH`, () => wallet.withdraw(account)];
     }
     const records = this.saved();
-    if (!live && record && records.length > 1 && this.secondary.hidden) {
-      this.action(this.secondary, 'Другая ставка', async () => {
+    if (!session && records.length) {
+      if (!record) history = ['Сохранённые ставки', async () => this.open(null, records[records.length - 1])];
+      else if (records.length > 1) {
         const index = records.findIndex(({ key }) => key === record.key);
-        this.open(null, records[(index + 1) % records.length]);
-      });
+        history = [
+          `Следующая ставка (${index + 1} из ${records.length})`,
+          async () => this.open(null, records[(index + 1) % records.length]),
+        ];
+      }
     }
-    this.note.textContent = this.error || readError || note;
+    this.terms.textContent = terms;
+    this.amountField.hidden = !showAmount;
+    this.resultField.hidden = !showResult;
+    this.action(this.primary, ...primary);
+    this.action(this.secondary, ...secondary);
+    this.action(this.history, ...history);
+    this.walletBack.hidden = Boolean(session || !record);
+    this.walletBack.disabled = this.busy;
+    const message = this.error || readError || note;
+    if (this.note.textContent !== message) this.note.textContent = message;
   }
 
   private async create(session: Session): Promise<void> {

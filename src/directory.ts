@@ -12,6 +12,7 @@ export type DirectoryState = 'connecting' | 'online' | 'offline' | 'unsupported'
 type SignalContext = { roomId: string; requestId: string };
 const signalKinds = [
   'request',
+  'private-request',
   'reject',
   'cancel',
   'challenge',

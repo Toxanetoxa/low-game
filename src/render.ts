@@ -1,5 +1,5 @@
 import type { FighterState, GameState } from './combat';
-import { ATTACK_ACTIVE_TICK, FLOOR_Y, STAGE_HEIGHT, STAGE_WIDTH } from './combat';
+import { attackActiveTick, FLOOR_Y, STAGE_HEIGHT, STAGE_WIDTH } from './combat';
 
 const rust = {
   glow: '#ff6d4f',
@@ -185,7 +185,8 @@ function drawFighter(ctx: CanvasRenderingContext2D, fighter: FighterState, palet
 
   const stride = fighter.moving && fighter.grounded ? Math.round(Math.sin(time / 53) * 3) : 0;
   const breath = fighter.grounded && Math.sin(time / 310) > 0.25 ? 1 : 0;
-  const punching = Math.abs(fighter.attackTicks - ATTACK_ACTIVE_TICK) <= 3;
+  const attackFrame = fighter.attackTicks - attackActiveTick(fighter);
+  const punching = Math.abs(attackFrame) <= 3;
   const hurt = fighter.hitTicks > 0;
   const bodyLight = hurt && Math.floor(fighter.hitTicks / 2) % 2 === 0 ? '#ffdfd8' : palette.light;
 
@@ -419,6 +420,14 @@ function drawFighter(ctx: CanvasRenderingContext2D, fighter: FighterState, palet
     ctx.fillRect(16, -24, 4, 1);
     ctx.fillRect(23, -27, 7, 1);
     ctx.fillRect(25, -18, 4, 1);
+    if (fighter.attackKind !== 'jab' && fighter.attackKind && Math.abs(attackFrame) <= 2) {
+      ctx.fillStyle = fighter.attackKind === 'cross' ? '#ffe9a4' : palette.light;
+      const trail = fighter.attackKind === 'lunge' ? 12 : 7;
+      const y = fighter.attackKind === 'air' ? -16 : -22;
+      ctx.fillRect(25, y, trail, 1);
+      ctx.fillRect(29, y - 3, trail - 3, 1);
+      ctx.fillRect(26, y + 4, trail - 4, 1);
+    }
   } else {
     const guard = fighter.blocking ? -6 : 0;
     paint(ctx, outline, [

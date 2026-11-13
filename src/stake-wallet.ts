@@ -94,7 +94,7 @@ function localFaucetUrl(): URL {
 }
 
 function baseFaucetUrl(): URL {
-  const configured = import.meta.env.VITE_BASE_FAUCET_URL?.trim();
+  const configured = baseFaucetEndpoint();
   if (!configured) {
     throw new Error('Пополнение Base Sepolia пока недоступно.');
   }
@@ -109,6 +109,10 @@ function baseFaucetUrl(): URL {
     throw new Error('Адрес сервиса пополнения Base Sepolia задан неверно.');
   }
   return url;
+}
+
+function baseFaucetEndpoint(): string | undefined {
+  return import.meta.env.VITE_BASE_FAUCET_URL?.trim() || import.meta.env.VITE_DEV_BASE_FAUCET_PATH;
 }
 
 function matchIdBytes(matchId: string): Hex {
@@ -142,7 +146,7 @@ export class StakeWallet {
   }
 
   get usesEmbeddedFaucet(): boolean {
-    return !this.usesLocalNetwork && !import.meta.env.VITE_BASE_FAUCET_URL?.trim();
+    return !this.usesLocalNetwork && !baseFaucetEndpoint();
   }
 
   async requestTestFunds(account: Address): Promise<Hex> {

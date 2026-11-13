@@ -219,9 +219,9 @@ export class PeerSession {
     }
   }
 
-  send(data: unknown): boolean {
+  send(data: unknown, bufferLimit = MAX_BUFFERED_BYTES): boolean {
     const channel = this.channel;
-    if (channel?.readyState !== 'open' || channel.bufferedAmount > MAX_BUFFERED_BYTES) {
+    if (channel?.readyState !== 'open' || channel.bufferedAmount > bufferLimit) {
       return false;
     }
 

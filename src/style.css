@@ -332,6 +332,10 @@ select:focus-visible {
 }
 
 .fighter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fighter-color);
   font-family: var(--mono);
   font-size: clamp(0.8rem, 1.65vw, 1.05rem);
@@ -340,6 +344,7 @@ select:focus-visible {
 }
 
 .fighter-hp {
+  flex: 0 0 auto;
   margin-inline-start: auto;
   color: var(--ink);
   font-family: var(--mono);
@@ -521,6 +526,7 @@ select:focus-visible {
 .control-guide {
   display: grid;
   justify-items: center;
+  gap: 9px;
   padding: 12px 17px;
   background: #13131e;
 }
@@ -575,6 +581,20 @@ select:focus-visible {
   transition-duration: 0ms;
 }
 
+.combo-guide {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-align: center;
+}
+
+.touch-combo-guide {
+  display: none;
+}
+
 .touch-controls {
   display: none;
   justify-content: space-between;
@@ -587,6 +607,8 @@ select:focus-visible {
 .touch-cluster {
   display: flex;
   gap: 7px;
+  touch-action: none;
+  -webkit-touch-callout: none;
 }
 
 .touch-key {
@@ -695,7 +717,7 @@ select:focus-visible {
   align-items: start;
   gap: 6px 8px;
   margin-bottom: 10px;
-  padding: 5px 5px 5px 9px;
+  padding: 8px;
   border: 1px solid #333145;
   background: #100f19;
 }
@@ -714,6 +736,17 @@ select:focus-visible {
   color: var(--ink);
   font: 750 0.82rem/1.3 var(--mono);
   overflow-wrap: anywhere;
+}
+
+.lobby-profile-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.lobby-profile-actions #edit-nickname {
+  margin-inline-end: auto;
 }
 
 .lobby-profile-wallet {
@@ -744,9 +777,7 @@ select:focus-visible {
   font-size: 0.72rem;
 }
 
-.lobby .lobby-profile #lobby-wallet-connect,
-.lobby .lobby-profile #lobby-wallet-topup {
-  justify-self: end;
+.lobby .lobby-profile-actions .button {
   text-align: center;
 }
 
@@ -924,11 +955,13 @@ select:focus-visible {
 
 .manual-connection {
   margin-top: 15px;
+  margin-bottom: 15px;
+  padding-top: 12px;
   border-top: 1px solid #302d40;
 }
 
 .manual-connection summary {
-  padding: 11px 0 2px;
+  padding: 9px 0;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 650;
@@ -947,21 +980,25 @@ select:focus-visible {
   margin-top: 11px;
 }
 
-.lobby-divider {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin: 12px 0;
-  color: var(--dim);
-  font-size: 0.73rem;
+#manual-connection summary {
+  color: var(--ink);
+  font-size: 0.84rem;
 }
 
-.lobby-divider::before,
-.lobby-divider::after {
-  flex: 1;
-  height: 1px;
-  background: #323042;
-  content: '';
+.private-manual summary {
+  color: var(--dim);
+}
+
+#private-share {
+  margin-top: 12px;
+}
+
+#private-join-error:empty {
+  display: none;
+}
+
+#private-join-error {
+  color: #ffad9b;
 }
 
 .lobby-form {
@@ -976,22 +1013,25 @@ select:focus-visible {
   font-weight: 730;
 }
 
-.lobby-form textarea {
+.lobby-form :is(input, textarea) {
   display: block;
   width: 100%;
   min-height: 47px;
-  max-height: 200px;
   padding: 9px 10px;
   border: 1px solid #414054;
   border-radius: 0;
   background: #0e0e18;
   color: var(--ink);
   font: 0.75rem/1.35 var(--mono);
-  resize: vertical;
   overflow-wrap: anywhere;
 }
 
-.lobby-form textarea::placeholder {
+.lobby-form textarea {
+  max-height: 200px;
+  resize: vertical;
+}
+
+.lobby-form :is(input, textarea)::placeholder {
   color: var(--dim);
 }
 
@@ -1021,11 +1061,8 @@ select:focus-visible {
   accent-color: var(--aqua);
 }
 
-.lobby-options p {
-  margin: 6px 0 0 22px;
-  color: var(--dim);
-  font-size: 0.69rem;
-  line-height: 1.4;
+.lobby-options .button {
+  margin-top: 9px;
 }
 
 .room-id {
@@ -1098,6 +1135,18 @@ select:focus-visible {
 .stake-card .button {
   min-height: 44px;
   touch-action: manipulation;
+}
+
+.stake-context {
+  display: grid;
+  gap: 3px;
+}
+
+.stake-context code {
+  color: var(--ink);
+  font: 700 0.72rem/1.4 var(--mono);
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .faucet-panel {
@@ -1473,7 +1522,7 @@ select:focus-visible {
 
   body[data-mobile-match='true'] .game-panel {
     display: grid;
-    grid-template-columns: clamp(108px, 15%, 144px) minmax(0, 1fr) clamp(72px, 12%, 100px);
+    grid-template-columns: clamp(112px, 15%, 144px) minmax(0, 1fr) clamp(112px, 15%, 144px);
     grid-template-rows: auto minmax(0, 1fr) auto;
     grid-template-areas:
       'hud hud hud'
@@ -1550,6 +1599,7 @@ select:focus-visible {
   body[data-mobile-match='true'][data-mobile-fighter='rust'] .fighter-hud-left .mobile-you,
   body[data-mobile-match='true'][data-mobile-fighter='volt'] .fighter-hud-right .mobile-you {
     display: block;
+    flex: 0 0 auto;
     color: var(--fighter-color);
     font-size: 0.65rem;
   }
@@ -1600,28 +1650,48 @@ select:focus-visible {
 
   body[data-mobile-match='true'] .touch-cluster {
     display: grid;
-    align-content: center;
-    gap: 6px;
-    padding: 6px;
+    align-content: end;
+    gap: 5px;
+    padding: 6px 5px 10px;
     background: #161522;
   }
 
   body[data-mobile-match='true'] .touch-cluster-movement {
     grid-area: movement;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-areas:
-      'jump jump'
-      'left right';
+    grid-template-areas: 'left right';
     border-right: 1px solid #302d40;
   }
 
   body[data-mobile-match='true'] .touch-cluster-combat {
     grid-area: combat;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      'jump block'
+      'attack attack'
+      'combo combo';
     border-left: 1px solid #302d40;
   }
 
-  body[data-mobile-match='true'] [data-action='jump'] {
+  body[data-mobile-match='true'] .touch-key-jump {
     grid-area: jump;
+  }
+
+  body[data-mobile-match='true'] .touch-key-block {
+    grid-area: block;
+  }
+
+  body[data-mobile-match='true'] .touch-key-attack {
+    grid-area: attack;
+  }
+
+  body[data-mobile-match='true'] .touch-combo-guide {
+    display: block;
+    grid-area: combo;
+    color: var(--muted);
+    font-size: 0.65rem;
+    line-height: 1.15;
+    text-align: center;
   }
 
   body[data-mobile-match='true'] [data-action='left'] {
@@ -1633,9 +1703,18 @@ select:focus-visible {
   }
 
   body[data-mobile-match='true'] .touch-key {
-    min-height: 48px;
-    padding-inline: 5px;
-    border-radius: 6px;
+    min-height: 55px;
+    padding-inline: 2px;
+    border-radius: 8px;
+  }
+
+  body[data-mobile-match='true'] .touch-key-direction,
+  body[data-mobile-match='true'] .touch-key-attack {
+    min-height: 64px;
+  }
+
+  body[data-mobile-match='true'] .touch-key-attack {
+    font-size: 0.88rem;
   }
 }
 
