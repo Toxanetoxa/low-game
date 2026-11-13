@@ -485,6 +485,13 @@ select:focus-visible {
   line-height: 1.45;
 }
 
+.rematch-timer {
+  margin-top: 4px;
+  color: var(--amber);
+  font: 850 1rem/1.2 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .round-actions {
   display: flex;
   flex-wrap: wrap;

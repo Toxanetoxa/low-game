@@ -33,6 +33,7 @@ const ui = {
   title: element('arena-title'),
   arenaMessage: element('arena-message'),
   rematch: element<HTMLButtonElement>('rematch'),
+  rematchTimer: element('rematch-timer'),
   roundActions: element('round-actions'),
   roundLobby: element<HTMLButtonElement>('round-lobby'),
   health: [element('p1-health'), element('p2-health')],
@@ -107,6 +108,8 @@ const keyFlashTimers = new Map<string, number>();
 
 const nicknameStorageKey = 'low-game.nickname';
 const challengeWaitMs = 30_000;
+const rematchWaitMs = 15_000;
+const rematchExpiredMessage = 'Время на подтверждение реванша истекло.';
 const countdownTicks = 3 * TICK_RATE;
 const tickMs = 1000 / TICK_RATE;
 const game = new Combat();
@@ -164,7 +167,8 @@ let connectTimer: number | undefined;
 let match: Frame | null = null;
 let snapshotTick = 0;
 let matchDirty = false;
-let rematchReady = { local: false, opponent: false, sendFailed: false };
+let rematchReady = { local: false, opponent: false, sendFailed: false, deadline: null as number | null };
+let rematchTimeout: number | undefined;
 let remoteInput: Readonly<Input> = EMPTY_INPUT;
 let remoteJump = false;
 let remoteAttack = false;
@@ -357,6 +361,23 @@ function clearInputs(): void {
   remoteAttack = false;
 }
 
+function resetRematch(): void {
+  window.clearTimeout(rematchTimeout);
+  rematchReady = { local: false, opponent: false, sendFailed: false, deadline: null };
+}
+
+function expireRematch(): void {
+  if (mode === 'host' && !(rematchReady.local && rematchReady.opponent)) {
+    closeRoom(rematchExpiredMessage, false, true, 'rematch-timeout');
+  }
+}
+
+function startRematchTimer(): void {
+  if (rematchReady.deadline !== null) return;
+  rematchReady.deadline = performance.now() + rematchWaitMs;
+  if (mode === 'host') rematchTimeout = window.setTimeout(expireRematch, rematchWaitMs);
+}
+
 function resetMatch(): void {
   mode = 'idle';
   match = null;
@@ -366,7 +387,7 @@ function resetMatch(): void {
   delete document.body.dataset.mobileMatch;
   delete document.body.dataset.mobileFighter;
   void exitMatchFullscreen();
-  rematchReady = { local: false, opponent: false, sendFailed: false };
+  resetRematch();
 }
 
 function updateFullscreenButton(): void {
@@ -423,7 +444,7 @@ function nextRound(stakeKey?: Hex): void {
   snapshotTick = 0;
   match = { kind: 'frame', game: game.state, scores, round, countdown: countdownTicks, stakeKey };
   matchDirty = true;
-  rematchReady = { local: false, opponent: false, sendFailed: false };
+  resetRematch();
 }
 
 function startMatch(nextMode: PeerRole): void {
@@ -472,7 +493,7 @@ function setLobby(step: 'initial' | 'exchange' | 'public' | 'challenge' | 'conne
   directory?.setAvailable(step === 'initial' && !ui.layout.hidden && nickname !== null);
 }
 
-function closeRoom(note = '', isError = false, notifyPeer = false): void {
+function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?: 'rematch-timeout'): void {
   window.clearTimeout(reconnectTimer);
   window.clearTimeout(connectTimer);
   window.clearTimeout(publicTimer);
@@ -487,16 +508,18 @@ function closeRoom(note = '', isError = false, notifyPeer = false): void {
   const failedPrivateJoin = isError && !linkOpen && attempt?.role === 'guest' && attempt.privateRoom;
   publicAttempt = null;
   if (attempt?.role === 'host' && attempt.listed) directory?.withdraw(attempt.roomId);
-  if (attempt && notifyPeer) {
+  const closing = peer;
+  peer = null;
+  const leaveSent = notifyPeer && closing?.send({ kind: 'leave', reason: leaveReason });
+  // Send the timeout reason on the data channel before closing the connection.
+  if (attempt && notifyPeer && (!leaveReason || !leaveSent)) {
     const admission = attempt.role === 'host' ? attempt.guest : attempt.host;
     if (admission) sendPublicNotice(admission, attempt.roomId, attempt.role === 'host' ? 'reject' : 'cancel');
   }
-  const closing = peer;
-  peer = null;
   opponentNickname = null;
   linkOpen = false;
   stakes.disconnect();
-  if (notifyPeer && closing?.send({ kind: 'leave' })) {
+  if (leaveSent && closing) {
     window.setTimeout(() => closing.close(), 250);
   } else {
     closing?.close();
@@ -595,7 +618,7 @@ function receive(session: PeerSession, data: unknown): void {
   if (session !== peer || data === null || typeof data !== 'object') return;
   const packet = data as Record<string, unknown>;
   if (packet.kind === 'leave') {
-    closeRoom('Игрок покинул комнату.');
+    closeRoom(packet.reason === 'rematch-timeout' ? rematchExpiredMessage : 'Игрок покинул комнату.');
     return;
   }
 
@@ -611,7 +634,13 @@ function receive(session: PeerSession, data: unknown): void {
 
   if (packet.kind === 'rematch-ready') {
     if (match && packet.round === match.round && (session.role === 'guest' || match.game.winner !== null)) {
+      if (session.role === 'host' && rematchReady.deadline !== null && performance.now() >= rematchReady.deadline) {
+        expireRematch();
+        return;
+      }
+      startRematchTimer();
       rematchReady.opponent = true;
+      if (rematchReady.local) window.clearTimeout(rematchTimeout);
     }
     return;
   }
@@ -632,7 +661,7 @@ function receive(session: PeerSession, data: unknown): void {
       localJump = false;
       localAttack = false;
       predictedGuestX = null;
-      rematchReady = { local: false, opponent: false, sendFailed: false };
+      resetRematch();
     }
     match = packet;
     if (packet.stakeKey && packet.game.winner !== null) stakes.recordResult(packet.stakeKey, packet.game.winner);
@@ -1524,9 +1553,13 @@ function updateScreen(): void {
   setText(ui.timer, String(seconds).padStart(2, '0'));
 
   const roundEnded = Boolean(match && state.winner !== null);
+  const remaining =
+    rematchReady.deadline === null ? null : Math.max(0, Math.ceil((rematchReady.deadline - performance.now()) / 1000));
   ui.roundActions.hidden = mode === 'idle' || (!roundEnded && linkOpen);
   ui.rematch.hidden = !roundEnded || !linkOpen || stakes.hasMatch;
-  ui.rematch.disabled = rematchReady.local;
+  ui.rematch.disabled = rematchReady.local || remaining === 0;
+  ui.rematchTimer.hidden = !roundEnded || remaining === null || (rematchReady.local && rematchReady.opponent);
+  setText(ui.rematchTimer, remaining === null ? '' : `${remaining} с`);
   setText(ui.rematch, rematchReady.opponent && !rematchReady.local ? 'Принять реванш' : 'Реванш');
 
   if (mode === 'idle') {
@@ -1603,8 +1636,16 @@ ui.mobileFullscreen.addEventListener('click', () => {
 document.addEventListener('fullscreenchange', updateFullscreenButton);
 ui.rematch.addEventListener('click', () => {
   if (!linkOpen || !match || match.game.winner === null || stakes.hasMatch || rematchReady.local) return;
+  if (rematchReady.deadline !== null && performance.now() >= rematchReady.deadline) {
+    expireRematch();
+    return;
+  }
   rematchReady.local = peer?.send({ kind: 'rematch-ready', round: match.round }) ?? false;
   rematchReady.sendFailed = !rematchReady.local;
+  if (rematchReady.local) {
+    startRematchTimer();
+    if (rematchReady.opponent) window.clearTimeout(rematchTimeout);
+  }
 });
 
 document.addEventListener('keydown', pressKey);
