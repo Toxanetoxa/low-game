@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import process from 'node:process';
-import { createBaseFaucet } from './base-faucet.ts';
+import { createTestFaucet } from './base-faucet.ts';
 
 const host = process.env.BASE_FAUCET_HOST?.trim() || '127.0.0.1';
 const port = Number(process.env.BASE_FAUCET_PORT || 8547);
@@ -23,9 +23,11 @@ for (const origin of origins) {
 
 const apiKeyId = process.env.CDP_API_KEY_ID?.trim();
 const apiKeySecret = process.env.CDP_API_KEY_SECRET?.trim();
-if (!apiKeyId || !apiKeySecret)
-  throw new Error('Set CDP_API_KEY_ID and CDP_API_KEY_SECRET to run the Base Sepolia faucet');
-const faucet = createBaseFaucet(apiKeyId, apiKeySecret);
+if (!apiKeyId || !apiKeySecret) throw new Error('Set CDP_API_KEY_ID and CDP_API_KEY_SECRET to run the testnet faucets');
+const faucets = new Map([
+  ['/faucet', createTestFaucet(apiKeyId, apiKeySecret, 'base-sepolia')],
+  ['/faucet/solana', createTestFaucet(apiKeyId, apiKeySecret, 'solana-devnet')],
+]);
 
 const server = createServer({ requestTimeout: 15_000 }, (request, response) => {
   response.setHeader('Cache-Control', 'no-store');
@@ -49,7 +51,8 @@ const server = createServer({ requestTimeout: 15_000 }, (request, response) => {
     response.writeHead(403).end();
     return;
   }
-  if (request.url !== '/faucet') {
+  const faucet = faucets.get(request.url ?? '');
+  if (!faucet) {
     request.resume();
     response.writeHead(404).end();
     return;
@@ -64,5 +67,5 @@ const server = createServer({ requestTimeout: 15_000 }, (request, response) => {
   faucet(request, response);
 });
 server.listen(port, host, () => {
-  process.stdout.write(`Base Sepolia ETH faucet listening on ${host}:${port}/faucet\n`);
+  process.stdout.write(`Testnet faucets listening on ${host}:${port}/faucet and ${host}:${port}/faucet/solana\n`);
 });

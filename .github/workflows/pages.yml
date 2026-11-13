@@ -38,6 +38,8 @@ jobs:
           VITE_ESCROW_ADDRESS: ${{ vars.VITE_ESCROW_ADDRESS }}
           VITE_ESCROW_CHAIN_ID: ${{ vars.VITE_ESCROW_CHAIN_ID }}
           VITE_BASE_FAUCET_URL: ${{ vars.VITE_BASE_FAUCET_URL }}
+          VITE_SOLANA_ESCROW_PROGRAM: ${{ vars.VITE_SOLANA_ESCROW_PROGRAM }}
+          VITE_SOLANA_FAUCET_URL: ${{ vars.VITE_SOLANA_FAUCET_URL }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

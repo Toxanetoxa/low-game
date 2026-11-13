@@ -16,7 +16,9 @@
     "dev:base-faucet": "node --env-file-if-exists=.env.base-faucet --experimental-strip-types scripts/serve-base-faucet.ts"
   },
   "dependencies": {
+    "@solana/kit": "8.6.0",
     "mqtt": "^5.16.1",
+    "ox": "0.14.65",
     "viem": "^2.57.19"
   },
   "devDependencies": {

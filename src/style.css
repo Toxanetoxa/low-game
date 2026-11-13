@@ -767,6 +767,20 @@ select:focus-visible {
   text-align: end;
 }
 
+.lobby-profile-wallet select {
+  justify-self: end;
+  min-height: 34px;
+  padding: 4px 7px;
+  border: 1px solid #494456;
+  background: #211e30;
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.lobby-wallet-feedback a {
+  color: var(--aqua);
+}
+
 .lobby-profile-wallet strong {
   color: var(--aqua);
   font-variant-numeric: tabular-nums;

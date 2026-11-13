@@ -1,16 +1,18 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Address } from 'viem';
 import { Buffer } from 'node:buffer';
 import { createPrivateKey, randomBytes, randomUUID, sign } from 'node:crypto';
+import * as Base58 from 'ox/Base58';
 import { getAddress, isAddress, zeroAddress } from 'viem';
 
-const endpoint = new URL('https://api.cdp.coinbase.com/platform/v2/evm/faucet');
 const maxBodyBytes = 1_024;
 const cooldownSeconds = 60;
 const claimWindowMs = 60 * 60_000;
 const claimsPerHour = 30;
+const base58Pattern = /^[1-9A-HJ-NP-Za-km-z]+$/u;
 
-function createRequestSigner(keyId: string, secret: string): () => string {
+type FaucetNetwork = 'base-sepolia' | 'solana-devnet';
+
+function createRequestSigner(keyId: string, secret: string, endpoint: URL): () => string {
   const decoded = Buffer.from(secret, 'base64');
   const privateKey =
     decoded.length === 64 && !secret.startsWith('-----BEGIN')
@@ -76,7 +78,13 @@ function providerRetryAfter(value: string | null): number | undefined {
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
 }
 
-async function readAddress(request: IncomingMessage): Promise<Address | null> {
+function isSolanaValue(value: string, bytes: number): boolean {
+  return (
+    value.length <= (bytes === 32 ? 44 : 88) && base58Pattern.test(value) && Base58.toBytes(value).length === bytes
+  );
+}
+
+async function readAddress(request: IncomingMessage, network: FaucetNetwork): Promise<string | null> {
   const contentType = request.headers['content-type']?.split(';')[0].trim().toLowerCase();
   if (contentType !== 'application/json' || Number(request.headers['content-length']) > maxBodyBytes) {
     request.resume();
@@ -95,15 +103,19 @@ async function readAddress(request: IncomingMessage): Promise<Address | null> {
   try {
     const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { address?: unknown } | null;
     const address = value?.address;
-    return typeof address === 'string' && isAddress(address) && address !== zeroAddress ? getAddress(address) : null;
+    if (typeof address !== 'string') return null;
+    if (network === 'solana-devnet') return isSolanaValue(address, 32) && address !== '1'.repeat(32) ? address : null;
+    return isAddress(address) && address !== zeroAddress ? getAddress(address) : null;
   } catch {
     return null;
   }
 }
 
-export function createBaseFaucet(keyId: string, keySecret: string) {
-  const signRequest = createRequestSigner(keyId, keySecret.replaceAll('\\n', '\n'));
-  const nextClaimAt = new Map<Address, number>();
+export function createTestFaucet(keyId: string, keySecret: string, network: FaucetNetwork) {
+  const solana = network === 'solana-devnet';
+  const endpoint = new URL(`https://api.cdp.coinbase.com/platform/v2/${solana ? 'solana' : 'evm'}/faucet`);
+  const signRequest = createRequestSigner(keyId, keySecret.replaceAll('\\n', '\n'), endpoint);
+  const nextClaimAt = new Map<string, number>();
   const recentClaims: number[] = [];
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -114,7 +126,7 @@ export function createBaseFaucet(keyId: string, keySecret: string) {
       sendJson(response, 405, {});
       return;
     }
-    const address = await readAddress(request);
+    const address = await readAddress(request, network);
     if (!address) {
       sendJson(response, 400, {});
       return;
@@ -142,7 +154,7 @@ export function createBaseFaucet(keyId: string, keySecret: string) {
         'Content-Type': 'application/json',
         'X-Idempotency-Key': randomUUID(),
       },
-      body: JSON.stringify({ address, network: 'base-sepolia', token: 'eth' }),
+      body: JSON.stringify(solana ? { address, token: 'sol' } : { address, network, token: 'eth' }),
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     });
@@ -153,17 +165,25 @@ export function createBaseFaucet(keyId: string, keySecret: string) {
     }
     if (!result.ok) {
       await result.body?.cancel();
-      console.warn(`Base Sepolia faucet provider returned HTTP ${result.status}`);
+      console.warn(`${network} faucet provider returned HTTP ${result.status}`);
       sendJson(response, 503, {});
       return;
     }
-    const body = (await result.json()) as { transactionHash?: unknown } | null;
-    const transactionHash = body?.transactionHash;
-    if (typeof transactionHash !== 'string' || !/^0x[\da-f]{64}$/i.test(transactionHash)) {
-      sendJson(response, 503, {});
-      return;
+    const body = (await result.json()) as { transactionHash?: unknown; transactionSignature?: unknown } | null;
+    if (solana) {
+      const signature = body?.transactionSignature;
+      if (typeof signature === 'string' && isSolanaValue(signature, 64)) {
+        sendJson(response, 200, { signature });
+        return;
+      }
+    } else {
+      const transactionHash = body?.transactionHash;
+      if (typeof transactionHash === 'string' && /^0x[\da-f]{64}$/i.test(transactionHash)) {
+        sendJson(response, 200, { transactionHash });
+        return;
+      }
     }
-    sendJson(response, 200, { transactionHash });
+    sendJson(response, 503, {});
   }
 
   return (request: IncomingMessage, response: ServerResponse): void => {

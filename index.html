@@ -207,16 +207,21 @@
                 <strong id="player-nickname" dir="auto"></strong>
               </div>
               <div class="lobby-profile-wallet">
-                <span>Тестовый ETH</span>
+                <label for="lobby-wallet-asset">Тестовый кошелёк</label>
+                <select id="lobby-wallet-asset">
+                  <option value="ETH">ETH</option>
+                  <option value="SOL">SOL</option>
+                </select>
                 <strong id="lobby-wallet-balance" dir="ltr" hidden>—</strong>
-                <span id="lobby-wallet-status">Кошелёк не подключён</span>
+                <span id="lobby-wallet-status">Кошелёк ещё не создан</span>
               </div>
               <div class="lobby-profile-actions">
                 <button id="edit-nickname" class="button button-secondary" type="button" aria-label="Изменить никнейм">
                   Изменить
                 </button>
-                <button id="lobby-wallet-connect" class="button button-secondary" type="button">
-                  Подключить кошелёк
+                <button id="lobby-wallet-connect" class="button button-secondary" type="button">Создать кошелёк</button>
+                <button id="lobby-wallet-external" class="button button-secondary" type="button" hidden>
+                  Внешний ETH
                 </button>
                 <button id="lobby-wallet-topup" class="button button-secondary" type="button" hidden>Пополнить</button>
                 <button
@@ -398,22 +403,32 @@
             <button id="stake-close" class="button button-secondary" type="button">Закрыть</button>
           </header>
           <div class="stake-context">
+            <label id="stake-asset-field" class="stake-field" hidden>
+              Валюта ставки
+              <select id="stake-asset">
+                <option value="ETH">ETH</option>
+                <option value="SOL">SOL</option>
+              </select>
+            </label>
             <p id="stake-network" class="stake-terms"></p>
             <code id="stake-account" dir="ltr" hidden></code>
           </div>
+          <p id="stake-storage-note" class="stake-terms" hidden>
+            Ключ хранится в этом браузере. Используйте только тестовые средства.
+          </p>
           <dl id="stake-balances" class="stake-balances" aria-label="Баланс">
             <div>
               <dt>В кошельке</dt>
               <dd id="stake-wallet-balance">—</dd>
             </div>
-            <div>
+            <div id="stake-withdrawable-field">
               <dt>Доступно к выводу</dt>
               <dd id="stake-withdrawable-balance">—</dd>
             </div>
           </dl>
           <p id="stake-terms" class="stake-terms"></p>
           <div id="stake-amount-field" class="stake-field" hidden>
-            <label for="stake-amount">Сумма с каждого игрока, ETH</label>
+            <label id="stake-amount-label" for="stake-amount">Сумма с каждого игрока, ETH</label>
             <input
               id="stake-amount"
               type="text"
