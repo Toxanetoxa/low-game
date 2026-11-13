@@ -12,9 +12,11 @@ import {
   getBase64EncodedWireTransaction,
   getProgramDerivedAddress,
   getSignatureFromTransaction,
+  isSolanaError,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
   signatureBytes,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
 } from '@solana/kit';
 import { fromHex, parseUnits, toHex } from 'viem';
 import { formatSol, solanaDevnetRpc, SolanaTestWallet } from './solana-test-wallet';
@@ -24,6 +26,8 @@ const encoder = getAddressEncoder();
 const decoder = getAddressDecoder();
 const roomPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const maxStake = (2n ** 64n - 1n) / 2n;
+const rpcTimeout = 8_000;
+const clockCacheMs = 12_000;
 
 function rpcUrl(): string {
   const configured = import.meta.env.DEV && import.meta.env.VITE_SOLANA_RPC_URL?.trim();
@@ -50,6 +54,7 @@ export class SolanaStakeWallet {
   readonly directPayout = true;
   readonly accountWallet: SolanaTestWallet;
   private readonly rpc: ReturnType<typeof createSolanaRpc>;
+  private clock: { timestamp: bigint; sampledAt: number } | null = null;
 
   constructor() {
     const url = rpcUrl();
@@ -98,7 +103,7 @@ export class SolanaStakeWallet {
   async status(key: Hex) {
     const { value } = await this.rpc
       .getAccountInfo(this.matchAddress(key), { commitment: 'confirmed', encoding: 'base64' })
-      .send();
+      .send({ abortSignal: AbortSignal.timeout(rpcTimeout) });
     if (!value) throw new Error('Ставка пока не найдена в Solana.');
     const bytes = Uint8Array.from(atob(value.data[0]), (character) => character.charCodeAt(0));
     if (value.owner !== this.program() || bytes.length !== 96 || bytes[0] !== 1) {
@@ -119,9 +124,14 @@ export class SolanaStakeWallet {
   }
 
   async time(): Promise<bigint> {
-    const slot = await this.rpc.getSlot({ commitment: 'confirmed' }).send();
-    const timestamp = await this.rpc.getBlockTime(slot).send();
+    const elapsed = this.clock ? performance.now() - this.clock.sampledAt : Infinity;
+    if (this.clock && elapsed < clockCacheMs) return this.clock.timestamp + BigInt(Math.floor(elapsed / 1_000));
+
+    const abortSignal = AbortSignal.timeout(rpcTimeout);
+    const slot = await this.rpc.getSlot({ commitment: 'confirmed' }).send({ abortSignal });
+    const timestamp = await this.rpc.getBlockTime(slot).send({ abortSignal });
     if (timestamp === null) throw new Error('Solana не вернула время сети.');
+    this.clock = { timestamp, sampledAt: performance.now() };
     return timestamp;
   }
 
@@ -133,7 +143,9 @@ export class SolanaStakeWallet {
     fundingDeadline: bigint,
     settlementDeadline: bigint,
   ): Promise<Hex> {
-    const minimum = await this.rpc.getMinimumBalanceForRentExemption(0n).send();
+    const minimum = await this.rpc
+      .getMinimumBalanceForRentExemption(0n)
+      .send({ abortSignal: AbortSignal.timeout(rpcTimeout) });
     if (stake < minimum) throw new Error(`Минимальная ставка Solana — ${formatSol(minimum)} SOL.`);
     const key = await this.key(roomId, account);
     const data = new Uint8Array(41);
@@ -193,7 +205,9 @@ export class SolanaStakeWallet {
   private async send(account: string, data: Uint8Array, accounts: Instruction['accounts']): Promise<void> {
     await this.accountWallet.ensureTestNetwork();
     const feePayer = address(account);
-    const { value: lifetime } = await this.rpc.getLatestBlockhash({ commitment: 'confirmed' }).send();
+    const { value: lifetime } = await this.rpc
+      .getLatestBlockhash({ commitment: 'confirmed' })
+      .send({ abortSignal: AbortSignal.timeout(rpcTimeout) });
     if (this.accountWallet.address !== feePayer) throw new Error('Выбран другой кошелёк SOL.');
     const programAddress = this.program();
     const message = appendTransactionMessageInstruction(
@@ -211,20 +225,37 @@ export class SolanaStakeWallet {
       },
     };
     const signature = getSignatureFromTransaction(signed);
+    const wire = getBase64EncodedWireTransaction(signed);
+    const submit = () =>
+      this.rpc
+        .sendTransaction(wire, { encoding: 'base64', preflightCommitment: 'confirmed' })
+        .send({ abortSignal: AbortSignal.timeout(rpcTimeout) });
+
+    let submissionError: unknown;
     try {
-      await this.rpc
-        .sendTransaction(getBase64EncodedWireTransaction(signed), {
-          encoding: 'base64',
-          preflightCommitment: 'confirmed',
-        })
-        .send();
+      await submit();
     } catch (error) {
-      const confirmed = await this.accountWallet.confirmFunds(signature);
-      if (confirmed === true) return;
-      throw error;
+      submissionError = error;
+      if (
+        error instanceof TypeError ||
+        (error instanceof DOMException && error.name === 'TimeoutError') ||
+        (isSolanaError(error, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR) &&
+          (error.context.statusCode === 429 || error.context.statusCode >= 500))
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        // The same signed transaction has the same signature, even if the first submission reached Solana.
+        try {
+          await submit();
+          submissionError = undefined;
+        } catch (retryError) {
+          submissionError = retryError;
+        }
+      }
     }
     const confirmed = await this.accountWallet.confirmFunds(signature);
+    if (confirmed === true) return;
     if (confirmed === false) throw new Error('Solana отклонила транзакцию.');
-    if (confirmed === null) throw new Error('Подтверждение SOL задерживается. Проверьте ставку перед повтором.');
+    if (submissionError) throw submissionError;
+    throw new Error('Подтверждение SOL задерживается. Проверьте ставку перед повтором.');
   }
 }

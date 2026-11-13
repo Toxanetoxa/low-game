@@ -27,6 +27,7 @@ type Options = {
   fighterNames: () => readonly [string, string];
 };
 type PanelAction = readonly [label: string, run?: () => Promise<void>];
+const refreshInterval = { ETH: 2_500, SOL: 5_000 };
 
 const hexKey = /^0x[\da-f]{64}$/i;
 function sameAddress(a: string, b: string): boolean {
@@ -145,9 +146,18 @@ export class Stakes {
       }
     });
     window.setInterval(() => {
-      if (this.lobbyVisible || this.session?.record || this.isOpen) void this.refresh();
-    }, 2_500);
+      if (this.asset === 'ETH' && this.shouldPoll()) void this.refresh();
+    }, refreshInterval.ETH);
+    window.setInterval(() => {
+      if (this.asset === 'SOL' && this.shouldPoll()) void this.refresh();
+    }, refreshInterval.SOL);
     this.showLobbyBalance(null);
+  }
+
+  private shouldPoll(): boolean {
+    const session = this.session;
+    const inSolanaRound = this.asset === 'SOL' && session?.roundStarted && session.result === null;
+    return this.lobbyVisible || this.isOpen || Boolean(session?.record && !inSolanaRound);
   }
 
   private get wallet(): Wallet {
@@ -271,7 +281,9 @@ export class Stakes {
     if (packet.kind === 'stake-wallet' && typeof packet.account === 'string') {
       try {
         const previous = session.opponents[asset];
-        session.opponents[asset] = wallet.normalizeAccount(packet.account);
+        const account = wallet.normalizeAccount(packet.account);
+        if (previous === account) return true;
+        session.opponents[asset] = account;
         if (!previous) void this.sendWallets();
         if (session.role === 'host' && session.record && session.asset === asset) {
           this.send('stake-offer', { key: session.record.key });
@@ -280,21 +292,15 @@ export class Stakes {
         return true;
       }
     }
-    if (
-      packet.kind === 'stake-offer' &&
-      session.role === 'guest' &&
-      !session.record &&
-      typeof packet.key === 'string' &&
-      hexKey.test(packet.key)
-    ) {
-      void this.loadOffer(session, wallet, packet.key as Hex);
+    if (packet.kind === 'stake-offer') {
+      if (session.role === 'guest' && !session.record && typeof packet.key === 'string' && hexKey.test(packet.key)) {
+        void this.loadOffer(session, wallet, packet.key as Hex);
+      }
+      return true;
     }
-    if (
-      packet.kind === 'stake-ready' &&
-      session.role === 'host' &&
-      session.asset === asset &&
-      session.record?.key === packet.key
-    ) {
+    if (packet.kind === 'stake-ready') {
+      if (session.role !== 'host' || session.asset !== asset || session.record?.key !== packet.key) return true;
+      if (session.opponentReady) return true;
       session.opponentReady = true;
     }
     void this.refresh();
