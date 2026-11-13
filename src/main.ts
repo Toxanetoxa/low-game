@@ -33,6 +33,7 @@ const ui = {
   title: element('arena-title'),
   arenaMessage: element('arena-message'),
   rematch: element<HTMLButtonElement>('rematch'),
+  declineRematch: element<HTMLButtonElement>('decline-rematch'),
   rematchTimer: element('rematch-timer'),
   roundActions: element('round-actions'),
   roundLobby: element<HTMLButtonElement>('round-lobby'),
@@ -116,6 +117,7 @@ const game = new Combat();
 const renderer = new ArenaRenderer(element<HTMLCanvasElement>('arena'));
 
 type Mode = 'idle' | PeerRole;
+type LeaveReason = 'rematch-timeout' | 'rematch-declined';
 type Scores = [number, number];
 type Admission = { identity: RoomIdentity; requestId: string };
 type PublicAttempt =
@@ -493,7 +495,7 @@ function setLobby(step: 'initial' | 'exchange' | 'public' | 'challenge' | 'conne
   directory?.setAvailable(step === 'initial' && !ui.layout.hidden && nickname !== null);
 }
 
-function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?: 'rematch-timeout'): void {
+function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?: LeaveReason): void {
   window.clearTimeout(reconnectTimer);
   window.clearTimeout(connectTimer);
   window.clearTimeout(publicTimer);
@@ -511,7 +513,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?:
   const closing = peer;
   peer = null;
   const leaveSent = notifyPeer && closing?.send({ kind: 'leave', reason: leaveReason });
-  // Send the timeout reason on the data channel before closing the connection.
+  // Use signaling as a fallback when the data channel cannot send the rematch outcome.
   if (attempt && notifyPeer && (!leaveReason || !leaveSent)) {
     const admission = attempt.role === 'host' ? attempt.guest : attempt.host;
     if (admission) sendPublicNotice(admission, attempt.roomId, attempt.role === 'host' ? 'reject' : 'cancel');
@@ -618,7 +620,10 @@ function receive(session: PeerSession, data: unknown): void {
   if (session !== peer || data === null || typeof data !== 'object') return;
   const packet = data as Record<string, unknown>;
   if (packet.kind === 'leave') {
-    closeRoom(packet.reason === 'rematch-timeout' ? rematchExpiredMessage : 'Игрок покинул комнату.');
+    let note = 'Игрок покинул комнату.';
+    if (packet.reason === 'rematch-timeout') note = rematchExpiredMessage;
+    else if (packet.reason === 'rematch-declined') note = 'Соперник отказался от реванша.';
+    closeRoom(note);
     return;
   }
 
@@ -1555,12 +1560,16 @@ function updateScreen(): void {
   const roundEnded = Boolean(match && state.winner !== null);
   const remaining =
     rematchReady.deadline === null ? null : Math.max(0, Math.ceil((rematchReady.deadline - performance.now()) / 1000));
+  const canRematch = roundEnded && linkOpen && !stakes.hasMatch;
+  const incomingRematch = canRematch && rematchReady.opponent && !rematchReady.local;
   ui.roundActions.hidden = mode === 'idle' || (!roundEnded && linkOpen);
-  ui.rematch.hidden = !roundEnded || !linkOpen || stakes.hasMatch;
+  ui.rematch.hidden = !canRematch;
   ui.rematch.disabled = rematchReady.local || remaining === 0;
+  ui.declineRematch.hidden = !incomingRematch;
+  ui.roundLobby.hidden = incomingRematch;
   ui.rematchTimer.hidden = !roundEnded || remaining === null || (rematchReady.local && rematchReady.opponent);
   setText(ui.rematchTimer, remaining === null ? '' : `${remaining} с`);
-  setText(ui.rematch, rematchReady.opponent && !rematchReady.local ? 'Принять реванш' : 'Реванш');
+  setText(ui.rematch, incomingRematch ? 'Принять реванш' : 'Реванш');
 
   if (mode === 'idle') {
     if (peer || publicAttempt || challenge) {
@@ -1645,6 +1654,12 @@ ui.rematch.addEventListener('click', () => {
   if (rematchReady.local) {
     startRematchTimer();
     if (rematchReady.opponent) window.clearTimeout(rematchTimeout);
+  }
+});
+ui.declineRematch.addEventListener('click', () => {
+  if (!linkOpen || !match || match.game.winner === null || stakes.hasMatch) return;
+  if (rematchReady.opponent && !rematchReady.local) {
+    closeRoom('Вы отказались от реванша.', false, true, 'rematch-declined');
   }
 });
 
