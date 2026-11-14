@@ -6,7 +6,8 @@ import { Combat, EMPTY_INPUT, isGameState, isInput, MAX_HEALTH, predictWalk, TIC
 import { RoomDirectory } from './directory';
 import { normalizeNickname } from './nickname';
 import { createRoomId, PeerSession, readInviteRoomId } from './peer';
-import { privateInviteCode, readPrivateInvite } from './private-invite';
+import { createInviteToken, privateInviteCode, readPrivateInvite } from './private-invite';
+import { RelaySession } from './relay';
 import { ArenaRenderer } from './render';
 import { Stakes } from './stakes';
 
@@ -110,6 +111,7 @@ const keyFlashTimers = new Map<string, number>();
 const nicknameStorageKey = 'low-game.nickname';
 const challengeWaitMs = 30_000;
 const rematchWaitMs = 15_000;
+const privateDirectWaitMs = 9_000;
 const rematchExpiredMessage = 'Время на подтверждение реванша истекло.';
 const countdownTicks = 3 * TICK_RATE;
 const tickMs = 1000 / TICK_RATE;
@@ -119,18 +121,23 @@ const renderer = new ArenaRenderer(element<HTMLCanvasElement>('arena'));
 type Mode = 'idle' | PeerRole;
 type LeaveReason = 'rematch-timeout' | 'rematch-declined';
 type Scores = [number, number];
-type Admission = { identity: RoomIdentity; requestId: string };
-type PublicAttempt =
-  | {
-      role: 'host';
-      roomId: string;
-      nickname: string;
-      listed: boolean;
-      privateCode?: string;
-      guest: Admission | null;
-      awaitingAnswer: boolean;
-    }
-  | { role: 'guest'; roomId: string; host: Admission; privateRoom?: boolean };
+type Admission = { identity: RoomIdentity; requestId: string; relay?: true };
+type RoomTransport = { transport?: 'direct' | 'relay' };
+type MatchSession = PeerSession | RelaySession;
+type PublicAttempt = RoomTransport &
+  (
+    | {
+        role: 'host';
+        roomId: string;
+        nickname: string;
+        listed: boolean;
+        privateCode?: string;
+        inviteToken?: string;
+        guest: Admission | null;
+        awaitingAnswer: boolean;
+      }
+    | { role: 'guest'; roomId: string; host: Admission; privateRoom?: boolean }
+  );
 
 type Challenge = {
   direction: 'incoming' | 'outgoing';
@@ -153,7 +160,7 @@ let opponentNickname: string | null = null;
 let checkingNickname = false;
 let sharedInvite = new URLSearchParams(location.hash.slice(1)).get('invite');
 let mode: Mode = 'idle';
-let peer: PeerSession | null = null;
+let peer: MatchSession | null = null;
 let directory: RoomDirectory | null = null;
 let directoryState: DirectoryState = 'connecting';
 let publicAttempt: PublicAttempt | null = null;
@@ -514,9 +521,20 @@ function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?:
   peer = null;
   const leaveSent = notifyPeer && closing?.send({ kind: 'leave', reason: leaveReason });
   // Use signaling as a fallback when the data channel cannot send the rematch outcome.
-  if (attempt && notifyPeer && (!leaveReason || !leaveSent)) {
-    const admission = attempt.role === 'host' ? attempt.guest : attempt.host;
-    if (admission) sendPublicNotice(admission, attempt.roomId, attempt.role === 'host' ? 'reject' : 'cancel');
+  if (attempt && notifyPeer) {
+    const admission = opponentInRoom(attempt);
+    if (admission && attempt.transport === 'relay' && linkOpen) {
+      void directory
+        ?.send(admission.identity, {
+          kind: 'relay-leave',
+          roomId: attempt.roomId,
+          requestId: admission.requestId,
+          reason: leaveReason,
+        })
+        .catch(() => {});
+    } else if (admission && (!leaveReason || !leaveSent)) {
+      sendPublicNotice(admission, attempt.roomId, attempt.role === 'host' ? 'reject' : 'cancel');
+    }
   }
   opponentNickname = null;
   linkOpen = false;
@@ -543,7 +561,7 @@ function closeRoom(note = '', isError = false, notifyPeer = false, leaveReason?:
   }
 }
 
-function peerState(session: PeerSession, state: PeerState): void {
+function peerState(session: MatchSession, state: PeerState): void {
   if (session !== peer) return;
   if (state === 'connected') {
     window.clearTimeout(reconnectTimer);
@@ -552,7 +570,7 @@ function peerState(session: PeerSession, state: PeerState): void {
     linkOpen = true;
     ui.roomId.textContent = session.roomId;
     setLobby('connected');
-    connection('P2P · соединено', 'connected');
+    connection(session instanceof RelaySession ? 'Через ретранслятор · соединено' : 'P2P · соединено', 'connected');
     message(opponentNickname ? `Соперник · ${opponentNickname}` : '');
     if (mode !== session.role) startMatch(session.role);
     if (nickname) session.send({ kind: 'player-profile', nickname });
@@ -616,14 +634,17 @@ function isFrame(value: Record<string, unknown>): value is Frame {
   );
 }
 
-function receive(session: PeerSession, data: unknown): void {
+function opponentLeft(reason: unknown): void {
+  if (reason === 'rematch-timeout') closeRoom(rematchExpiredMessage);
+  else if (reason === 'rematch-declined') closeRoom('Соперник отказался от реванша.');
+  else closeRoom('Игрок покинул комнату.');
+}
+
+function receive(session: MatchSession, data: unknown): void {
   if (session !== peer || data === null || typeof data !== 'object') return;
   const packet = data as Record<string, unknown>;
   if (packet.kind === 'leave') {
-    let note = 'Игрок покинул комнату.';
-    if (packet.reason === 'rematch-timeout') note = rematchExpiredMessage;
-    else if (packet.reason === 'rematch-declined') note = 'Соперник отказался от реванша.';
-    closeRoom(note);
+    opponentLeft(packet.reason);
     return;
   }
 
@@ -677,12 +698,35 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : 'Не удалось подключиться. Попробуйте ещё раз.';
 }
 
-function attachPeer(role: PeerRole, useStun: boolean): PeerSession {
+function attachPeer(role: PeerRole, useStun: boolean, privateAttempt?: PublicAttempt): PeerSession {
   const session = new PeerSession(
     role,
     {
-      onState: (state) => peerState(session, state),
-      onData: (data) => receive(session, data),
+      onState(state) {
+        if (session !== peer) return;
+        if (privateAttempt && !privateAttempt.transport) {
+          if (state === 'connected' && role === 'host' && session.send({ kind: 'direct-start' })) {
+            privateAttempt.transport = 'direct';
+          } else {
+            if (state === 'failed' || state === 'closed' || (state === 'connected' && role === 'host')) {
+              void requestRelay(privateAttempt);
+            }
+            return;
+          }
+        }
+        peerState(session, state);
+      },
+      onData(data) {
+        if (session !== peer) return;
+        if (privateAttempt && !privateAttempt.transport) {
+          if (role === 'guest' && (data as { kind?: string } | null)?.kind === 'direct-start') {
+            privateAttempt.transport = 'direct';
+            peerState(session, 'connected');
+          }
+          return;
+        }
+        receive(session, data);
+      },
     },
     { useStun },
   );
@@ -1073,9 +1117,19 @@ function createPrivateRoom(): void {
     return;
   }
   const roomId = createRoomId();
-  const code = privateInviteCode(roomId, host);
+  const inviteToken = createInviteToken();
+  const code = privateInviteCode(roomId, host, inviteToken);
   openPublicWait(
-    { role: 'host', roomId, nickname, listed: false, privateCode: code, guest: null, awaitingAnswer: false },
+    {
+      role: 'host',
+      roomId,
+      nickname,
+      listed: false,
+      privateCode: code,
+      inviteToken,
+      guest: null,
+      awaitingAnswer: false,
+    },
     'Закрытая комната',
     '',
   );
@@ -1083,7 +1137,7 @@ function createPrivateRoom(): void {
   ui.privateShareCopy.focus();
 }
 
-async function joinPublicRoom(room: PublicRoom, privateRoom = false): Promise<void> {
+async function joinPublicRoom(room: PublicRoom, privateRoom = false, inviteToken?: string): Promise<void> {
   if (!nickname || peer || publicAttempt || challenge) return;
   if (!directory?.hasNickname) {
     if (privateRoom) showPrivateJoinError('Ждём подключения к лобби. Попробуйте ещё раз.');
@@ -1097,7 +1151,7 @@ async function joinPublicRoom(room: PublicRoom, privateRoom = false): Promise<vo
   const attempt: PublicAttempt = {
     role: 'guest',
     roomId: room.id,
-    host: { identity: room.host, requestId },
+    host: { identity: room.host, requestId, relay: inviteToken ? true : undefined },
     privateRoom,
   };
   openPublicWait(
@@ -1120,7 +1174,13 @@ async function joinPublicRoom(room: PublicRoom, privateRoom = false): Promise<vo
     privateRoom ? 14_000 : 42_000,
   );
   try {
-    await directory.send(room.host, { kind: privateRoom ? 'private-request' : 'request', roomId: room.id, requestId });
+    const context = { roomId: room.id, requestId };
+    await directory.send(
+      room.host,
+      privateRoom
+        ? { kind: 'private-request', ...context, inviteToken, relay: inviteToken ? true : undefined }
+        : { kind: 'request', ...context },
+    );
   } catch (error) {
     if (publicAttempt === attempt) closeRoom(errorText(error), true, true);
   }
@@ -1135,6 +1195,8 @@ async function reopenPublicRoom(attempt: Extract<PublicAttempt, { role: 'host' }
   const admission = attempt.guest;
   attempt.guest = null;
   attempt.awaitingAnswer = false;
+  attempt.transport = undefined;
+  window.clearTimeout(connectTimer);
   window.clearTimeout(publicTimer);
   const closing = peer;
   peer = null;
@@ -1183,10 +1245,13 @@ async function admitPublicGuest(
       void reopenPublicRoom(attempt, 'Подключение заняло слишком много времени.');
     else closeRoom('Подключение заняло слишком много времени.', true, true);
   }, 38_000);
+  if (admission.relay) {
+    connectTimer = window.setTimeout(() => void requestRelay(attempt), privateDirectWaitMs);
+  }
   try {
-    const session = attachPeer('host', true);
+    const session = attachPeer('host', true, admission.relay ? attempt : undefined);
     const code = await session.createInvite(attempt.roomId);
-    if (publicAttempt !== attempt || attempt.guest !== admission || session !== peer) return;
+    if (publicAttempt !== attempt || attempt.guest !== admission || session !== peer || attempt.transport) return;
     attempt.awaitingAnswer = true;
     await rooms.send(admission.identity, {
       kind: 'invite',
@@ -1195,9 +1260,69 @@ async function admitPublicGuest(
       code,
     });
   } catch (error) {
-    if (publicAttempt !== attempt || attempt.guest !== admission) return;
-    if (attempt.listed || attempt.privateCode) await reopenPublicRoom(attempt, errorText(error));
+    if (publicAttempt !== attempt || attempt.guest !== admission || attempt.transport) return;
+    if (admission.relay) await requestRelay(attempt);
+    else if (attempt.listed || attempt.privateCode) await reopenPublicRoom(attempt, errorText(error));
     else closeRoom(errorText(error), true, true);
+  }
+}
+
+function prepareRelay(attempt: PublicAttempt, admission: Admission, rooms: RoomDirectory): RelaySession {
+  const old = peer;
+  attempt.transport = 'relay';
+  window.clearTimeout(connectTimer);
+  const session = new RelaySession(
+    attempt.role,
+    attempt.roomId,
+    { onState: (state) => peerState(session, state), onData: (data) => receive(session, data) },
+    (onPacket) =>
+      rooms.openRelay(admission.identity, { roomId: attempt.roomId, requestId: admission.requestId }, onPacket),
+  );
+  peer = session;
+  old?.close();
+  setText(ui.publicWaitMessage, 'Подключаемся через ретранслятор…');
+  return session;
+}
+
+async function requestRelay(attempt: PublicAttempt): Promise<void> {
+  const rooms = directory;
+  const admission = opponentInRoom(attempt);
+  if (!rooms || publicAttempt !== attempt || attempt.transport || !admission?.relay) return;
+  const context = { roomId: attempt.roomId, requestId: admission.requestId };
+  try {
+    if (attempt.role === 'guest') {
+      setText(ui.publicWaitMessage, 'Пробуем подключиться через ретранслятор…');
+      await rooms.send(admission.identity, { kind: 'relay-please', ...context });
+      return;
+    }
+    const session = prepareRelay(attempt, admission, rooms);
+    await session.prepare();
+    if (publicAttempt === attempt && session === peer) {
+      await rooms.send(admission.identity, { kind: 'relay-offer', ...context });
+    }
+  } catch (error) {
+    if (publicAttempt !== attempt || linkOpen) return;
+    if (attempt.role === 'host') await reopenPublicRoom(attempt, errorText(error));
+    else if (!attempt.transport) closeRoom(errorText(error), true, true);
+  }
+}
+
+async function acceptRelay(attempt: PublicAttempt): Promise<void> {
+  const rooms = directory;
+  const admission = opponentInRoom(attempt);
+  if (!rooms || publicAttempt !== attempt || attempt.transport || !admission?.relay) return;
+  try {
+    const session = prepareRelay(attempt, admission, rooms);
+    await session.prepare();
+    if (publicAttempt !== attempt || session !== peer) return;
+    await rooms.send(admission.identity, {
+      kind: 'relay-accept',
+      roomId: attempt.roomId,
+      requestId: admission.requestId,
+    });
+    if (publicAttempt === attempt && session === peer) session.start();
+  } catch (error) {
+    if (publicAttempt === attempt) closeRoom(errorText(error), true, true);
   }
 }
 
@@ -1205,7 +1330,10 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
   const attempt = publicAttempt;
   if (
     signal.kind === 'private-request' &&
-    (attempt?.role !== 'host' || !attempt.privateCode || signal.roomId !== attempt.roomId)
+    (attempt?.role !== 'host' ||
+      !attempt.privateCode ||
+      signal.roomId !== attempt.roomId ||
+      signal.inviteToken !== attempt.inviteToken)
   ) {
     sendPublicNotice({ identity: sender, requestId: signal.requestId }, signal.roomId, 'reject');
     return;
@@ -1220,27 +1348,56 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
       opponent &&
       sameIdentity(sender, opponent.identity) &&
       signal.requestId === opponent.requestId &&
-      signal.kind === (attempt.role === 'host' ? 'cancel' : 'reject')
+      (signal.kind === (attempt.role === 'host' ? 'cancel' : 'reject') ||
+        (attempt.transport === 'relay' && signal.kind === 'relay-leave'))
     ) {
-      closeRoom('Игрок покинул комнату.');
+      opponentLeft(signal.kind === 'relay-leave' ? signal.reason : undefined);
     }
     return;
   }
   if (attempt.role === 'host' && requestsRoom) {
     if (signal.kind === 'request' && !attempt.listed) return;
-    await admitPublicGuest(attempt, { identity: sender, requestId: signal.requestId });
+    await admitPublicGuest(attempt, {
+      identity: sender,
+      requestId: signal.requestId,
+      relay: signal.kind === 'private-request' ? signal.relay : undefined,
+    });
     return;
   }
 
   const admission = attempt.role === 'host' ? attempt.guest : attempt.host;
   if (!admission || !sameIdentity(sender, admission.identity) || signal.requestId !== admission.requestId) return;
 
+  if (admission.relay) {
+    if (attempt.role === 'host' && signal.kind === 'relay-please') {
+      await requestRelay(attempt);
+      return;
+    }
+    if (attempt.role === 'guest' && signal.kind === 'relay-offer') {
+      await acceptRelay(attempt);
+      return;
+    }
+    if (attempt.role === 'host' && signal.kind === 'relay-accept' && attempt.transport === 'relay') {
+      if (peer instanceof RelaySession) peer.start();
+      return;
+    }
+    if (attempt.transport === 'relay' && signal.kind === 'relay-leave') {
+      opponentLeft(signal.reason);
+      return;
+    }
+  }
+
   try {
     if (attempt.role === 'host') {
       if (signal.kind === 'cancel') {
         if (attempt.listed || attempt.privateCode) await reopenPublicRoom(attempt, '');
         else closeRoom('Соперник отменил подключение.');
-      } else if (signal.kind === 'answer' && peer && attempt.awaitingAnswer) {
+      } else if (
+        signal.kind === 'answer' &&
+        peer instanceof PeerSession &&
+        attempt.awaitingAnswer &&
+        !attempt.transport
+      ) {
         attempt.awaitingAnswer = false;
         await peer.acceptAnswer(signal.code);
       }
@@ -1256,18 +1413,20 @@ async function receivePublicSignal(sender: RoomIdentity, signal: DirectorySignal
       if (attempt.privateRoom) {
         window.clearTimeout(publicTimer);
         publicTimer = window.setTimeout(() => {
-          if (publicAttempt === attempt && !linkOpen) closeRoom('Прямое подключение не удалось.', true, true);
+          if (publicAttempt === attempt && !linkOpen) closeRoom('Не удалось подключиться к комнате.', true, true);
         }, 30_000);
       }
-      const session = attachPeer('guest', true);
+      const session = attachPeer('guest', true, admission.relay ? attempt : undefined);
       setText(ui.publicWaitMessage, 'Устанавливаем прямое соединение…');
       const code = await session.acceptInvite(signal.code);
-      if (publicAttempt !== attempt || session !== peer) return;
+      if (publicAttempt !== attempt || session !== peer || attempt.transport) return;
       await directory.send(sender, { kind: 'answer', roomId: signal.roomId, requestId: signal.requestId, code });
     }
   } catch (error) {
-    if (publicAttempt !== attempt) return;
-    if (attempt.role === 'host' && attempt.guest === admission && (attempt.listed || attempt.privateCode)) {
+    if (publicAttempt !== attempt || attempt.transport) return;
+    if (admission.relay) {
+      await requestRelay(attempt);
+    } else if (attempt.role === 'host' && attempt.guest === admission && (attempt.listed || attempt.privateCode)) {
       await reopenPublicRoom(attempt, errorText(error));
     } else {
       closeRoom(errorText(error), true, true);
@@ -1282,7 +1441,7 @@ async function joinInvite(text: string): Promise<void> {
     const code = inviteFrom(text);
     const room = readPrivateInvite(code);
     if (room) {
-      await joinPublicRoom(room, true);
+      await joinPublicRoom(room, true, room.token);
     } else {
       readInviteRoomId(code);
       await openManualRoom('guest', code);
@@ -1368,7 +1527,7 @@ async function openManualRoom(role: PeerRole, invite = ''): Promise<void> {
 
 async function acceptAnswer(): Promise<void> {
   const session = peer;
-  if (session?.role !== 'host') return;
+  if (!(session instanceof PeerSession) || session.role !== 'host') return;
   ui.acceptAnswer.disabled = true;
   message('');
   try {

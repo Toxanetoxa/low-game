@@ -12,17 +12,39 @@ export type DirectoryState = 'connecting' | 'online' | 'offline' | 'unsupported'
 type SignalContext = { roomId: string; requestId: string };
 const signalKinds = [
   'request',
-  'private-request',
   'reject',
   'cancel',
   'challenge',
   'challenge-accept',
   'challenge-decline',
   'challenge-cancel',
+  'relay-please',
+  'relay-offer',
+  'relay-accept',
 ] as const;
 
 export type DirectorySignal = SignalContext &
-  ({ kind: (typeof signalKinds)[number] } | { kind: 'invite' | 'answer'; code: string });
+  (
+    | { kind: (typeof signalKinds)[number] }
+    | { kind: 'private-request'; relay?: true; inviteToken?: string }
+    | { kind: 'relay-leave'; reason?: 'rematch-timeout' | 'rematch-declined' }
+    | { kind: 'invite' | 'answer'; code: string }
+  );
+
+export type RelayPacket = { sequence: number; payload: unknown };
+export type RelayPort = {
+  send: (packet: RelayPacket, reliable: boolean) => Promise<void>;
+  close: () => void;
+};
+
+type RelayData = SignalContext & RelayPacket & { kind: 'relay-data' };
+type RelayBinding = {
+  target: RoomIdentity;
+  context: SignalContext;
+  key: CryptoKey;
+  abort: AbortController;
+  onPacket: (packet: RelayPacket) => void;
+};
 
 interface DirectoryCallbacks {
   onState: (state: DirectoryState) => void;
@@ -33,7 +55,7 @@ interface DirectoryCallbacks {
 }
 
 type Listing = { room: PublicRoom; expiresAt: number };
-type Envelope = { sender: RoomIdentity; iv: string; data: string };
+type Envelope = { sender: RoomIdentity; iv: string; data: string; relay?: true };
 
 const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
 const namespace = 'low-game/52d8ac30/v1';
@@ -42,6 +64,11 @@ const inboxPrefix = `${namespace}/inbox/`;
 const roomLifetimeSeconds = 35;
 const heartbeatMs = 10_000;
 const signalLifetimeSeconds = 30;
+const relayLifetimeSeconds = 5;
+const frameLifetimeSeconds = 2;
+const publishTimeoutMs = 2_500;
+const maxRelayBytes = 4_096;
+const maxRelayEncodedBytes = Math.ceil((maxRelayBytes + 16) / 3) * 4;
 const maxCodeLength = 32_768;
 const maxEnvelopeLength = 45_000;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -57,8 +84,41 @@ function isUuid(value: unknown): value is string {
   return typeof value === 'string' && uuid.test(value);
 }
 
+function isContext(value: unknown): value is SignalContext & Record<string, unknown> {
+  return isRecord(value) && isUuid(value.roomId) && isUuid(value.requestId);
+}
+
+function sameContext(a: SignalContext, b: SignalContext): boolean {
+  return a.roomId === b.roomId && a.requestId === b.requestId;
+}
+
+function isRelayPacket(value: unknown): value is RelayPacket {
+  return (
+    isRecord(value) &&
+    typeof value.sequence === 'number' &&
+    Number.isSafeInteger(value.sequence) &&
+    value.sequence >= 0 &&
+    Object.hasOwn(value, 'payload') &&
+    value.payload !== undefined
+  );
+}
+
+function isRelayData(value: unknown): value is RelayData {
+  return isRecord(value) && value.kind === 'relay-data' && isContext(value) && isRelayPacket(value);
+}
+
 function isSignal(value: unknown): value is DirectorySignal {
-  if (!isRecord(value) || !isUuid(value.roomId) || !isUuid(value.requestId)) return false;
+  if (!isRecord(value) || !isContext(value)) return false;
+  if (value.kind === 'private-request') {
+    return (
+      (value.relay === undefined || value.relay === true) &&
+      (value.inviteToken === undefined ||
+        (typeof value.inviteToken === 'string' && /^[0-9a-f]{32}$/.test(value.inviteToken)))
+    );
+  }
+  if (value.kind === 'relay-leave') {
+    return value.reason === undefined || value.reason === 'rematch-timeout' || value.reason === 'rematch-declined';
+  }
   if (signalKinds.includes(value.kind as (typeof signalKinds)[number])) return true;
   return (
     (value.kind === 'invite' || value.kind === 'answer') &&
@@ -74,7 +134,8 @@ function isEnvelope(value: unknown): value is Envelope {
     typeof value.iv === 'string' &&
     /^[0-9a-f]{24}$/.test(value.iv) &&
     typeof value.data === 'string' &&
-    /^[A-Z0-9+/]+={0,2}$/i.test(value.data)
+    /^[A-Z0-9+/]+={0,2}$/i.test(value.data) &&
+    (value.relay === undefined || value.relay === true)
   );
 }
 
@@ -106,25 +167,61 @@ function decodeBytes(encoded: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0));
 }
 
-function cipherParams(sender: RoomIdentity, recipient: RoomIdentity, iv: Uint8Array<ArrayBuffer>): AesGcmParams {
-  return {
-    name: 'AES-GCM',
-    iv,
-    additionalData: encoder.encode([namespace, sender.id, sender.key, recipient.id, recipient.key].join('/')),
-  };
+function cipherParams(
+  sender: RoomIdentity,
+  recipient: RoomIdentity,
+  iv: Uint8Array<ArrayBuffer>,
+  relay?: SignalContext,
+): AesGcmParams {
+  const scope = [namespace, sender.id, sender.key, recipient.id, recipient.key];
+  if (relay) scope.push('relay-data', relay.roomId, relay.requestId);
+  return { name: 'AES-GCM', iv, additionalData: encoder.encode(scope.join('/')) };
 }
 
-async function sharedKey(privateKey: CryptoKey, target: RoomIdentity): Promise<CryptoKey> {
+async function sharedKey(privateKey: CryptoKey, target: RoomIdentity, relay?: SignalContext): Promise<CryptoKey> {
   const publicKey = await crypto.subtle.importKey('raw', fromHex(target.key), curve, false, []);
   const secret = await crypto.subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, 256);
   const key = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveKey']);
+  const info = relay ? [namespace, 'relay-data', relay.roomId, relay.requestId].join('/') : namespace;
   return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: encoder.encode(namespace) },
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: encoder.encode(info) },
     key,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt'],
   );
+}
+
+async function encryptEnvelope(
+  message: Uint8Array<ArrayBuffer>,
+  key: CryptoKey,
+  sender: RoomIdentity,
+  recipient: RoomIdentity,
+  relay?: SignalContext,
+): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(cipherParams(sender, recipient, iv, relay), key, message);
+  const envelope: Envelope = {
+    sender,
+    iv: toHex(iv),
+    data: encodeBytes(new Uint8Array(ciphertext)),
+    relay: relay ? true : undefined,
+  };
+  return JSON.stringify(envelope);
+}
+
+async function decryptEnvelope(
+  envelope: Envelope,
+  recipient: RoomIdentity,
+  key: CryptoKey,
+  relay?: SignalContext,
+): Promise<unknown> {
+  const plaintext = await crypto.subtle.decrypt(
+    cipherParams(envelope.sender, recipient, fromHex(envelope.iv), relay),
+    key,
+    decodeBytes(envelope.data),
+  );
+  return parse(decoder.decode(plaintext));
 }
 
 export class RoomDirectory {
@@ -135,6 +232,9 @@ export class RoomDirectory {
   private connectionEpoch = 0;
   private closed = false;
   private openRoom: PublicRoom | null = null;
+  private relay: RelayBinding | null = null;
+  private inboxReliable = false;
+  private readonly pendingReliable = new Set<() => void>();
   private readonly rooms = new Map<string, Listing>();
   private readonly withdrawals = new Map<string, number>();
   private heartbeatTimer: number | undefined;
@@ -217,24 +317,131 @@ export class RoomDirectory {
     if (!isRoomIdentity(target) || !isSignal(signal)) throw new Error('Неверные данные подключения.');
 
     const key = await sharedKey(privateKey, target);
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt(
-      cipherParams(sender, target, iv),
-      key,
-      encoder.encode(JSON.stringify(signal)),
-    );
+    const envelope = await encryptEnvelope(encoder.encode(JSON.stringify(signal)), key, sender, target);
     if (this.onlineClient() !== client || this.connectionEpoch !== epoch) {
       throw new Error('Связь с общим лобби потеряна.');
     }
 
-    const envelope: Envelope = {
-      sender,
-      iv: toHex(iv),
-      data: encodeBytes(new Uint8Array(ciphertext)),
+    const topic = inboxPrefix + target.id;
+    if (signal.kind.startsWith('relay-') || (signal.kind === 'private-request' && signal.relay)) {
+      await this.publishReliable(client, topic, envelope, relayLifetimeSeconds);
+    } else {
+      await client.publishAsync(topic, envelope, {
+        qos: 0,
+        properties: { messageExpiryInterval: signalLifetimeSeconds },
+      });
+    }
+  }
+
+  async openRelay(
+    target: RoomIdentity,
+    context: SignalContext,
+    onPacket: (packet: RelayPacket) => void,
+  ): Promise<RelayPort> {
+    const client = this.onlineClient();
+    const own = this.ownIdentity;
+    const privateKey = this.privateKey;
+    if (!client || !own || !privateKey || !this.inboxReliable) throw new Error('Общее лобби недоступно.');
+    if (!isRoomIdentity(target) || target.id === own.id || !isContext(context)) {
+      throw new Error('Неверные данные комнаты.');
+    }
+    const epoch = this.connectionEpoch;
+    const boundTarget = { id: target.id, key: target.key };
+    const boundContext = { roomId: context.roomId, requestId: context.requestId };
+    const key = await sharedKey(privateKey, boundTarget, boundContext);
+    if (this.onlineClient() !== client || this.connectionEpoch !== epoch || this.relay) {
+      throw new Error('Подключение к комнате изменилось.');
+    }
+
+    const relay: RelayBinding = {
+      target: boundTarget,
+      context: boundContext,
+      key,
+      abort: new AbortController(),
+      onPacket,
     };
-    await client.publishAsync(inboxPrefix + target.id, JSON.stringify(envelope), {
-      qos: 0,
-      properties: { messageExpiryInterval: signalLifetimeSeconds },
+    this.relay = relay;
+    return {
+      send: (packet, reliable) => this.sendRelay(relay, own, packet, reliable),
+      close: () => {
+        if (this.relay !== relay) return;
+        this.relay = null;
+        relay.abort.abort();
+      },
+    };
+  }
+
+  private async sendRelay(
+    relay: RelayBinding,
+    own: RoomIdentity,
+    packet: RelayPacket,
+    reliable: boolean,
+  ): Promise<void> {
+    const client = this.onlineClient();
+    const epoch = this.connectionEpoch;
+    if (!client || !this.inboxReliable || this.relay !== relay) throw new Error('Связь с комнатой потеряна.');
+    if (!isRelayPacket(packet)) throw new Error('Неверные данные дуэли.');
+    const payload: RelayData = {
+      ...relay.context,
+      kind: 'relay-data',
+      sequence: packet.sequence,
+      payload: packet.payload,
+    };
+    const message = encoder.encode(JSON.stringify(payload));
+    if (message.length > maxRelayBytes) throw new Error('Сообщение дуэли слишком большое.');
+    const envelope = await encryptEnvelope(message, relay.key, own, relay.target, relay.context);
+    if (this.onlineClient() !== client || this.connectionEpoch !== epoch || this.relay !== relay) {
+      throw new Error('Связь с комнатой потеряна.');
+    }
+
+    const topic = inboxPrefix + relay.target.id;
+    if (reliable) {
+      await this.publishReliable(client, topic, envelope, relayLifetimeSeconds, relay.abort.signal);
+    } else {
+      await client.publishAsync(topic, envelope, {
+        qos: 0,
+        properties: { messageExpiryInterval: frameLifetimeSeconds },
+      });
+    }
+  }
+
+  private publishReliable(
+    client: MqttClient,
+    topic: string,
+    envelope: string,
+    lifetime: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let messageId: number | undefined;
+      let settled = false;
+      const cancel = () => finish(new Error('Не удалось доставить сообщение комнаты.'), true);
+      const finish = (error?: Error | null, remove = false) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        this.pendingReliable.delete(cancel);
+        signal?.removeEventListener('abort', cancel);
+        // mqtt.js retries unacknowledged QoS 1 packets on reconnect unless explicitly removed.
+        if (remove && messageId !== undefined) client.removeOutgoingMessage(messageId);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timer = window.setTimeout(cancel, publishTimeoutMs);
+      this.pendingReliable.add(cancel);
+      signal?.addEventListener('abort', cancel, { once: true });
+      client.publish(
+        topic,
+        envelope,
+        {
+          qos: 1,
+          properties: { messageExpiryInterval: lifetime },
+          cbStorePut() {
+            messageId = client.getLastMessageId();
+          },
+        },
+        (error) => finish(error),
+      );
     });
   }
 
@@ -245,6 +452,9 @@ export class RoomDirectory {
     for (const waiter of this.onlineWaiters) waiter(false);
     this.closed = true;
     this.connectionEpoch += 1;
+    this.relay?.abort.abort();
+    this.relay = null;
+    for (const cancel of this.pendingReliable) cancel();
     window.clearInterval(this.heartbeatTimer);
     window.clearInterval(this.expiryTimer);
     this.client?.end();
@@ -292,6 +502,8 @@ export class RoomDirectory {
     });
     client.on('close', () => {
       this.connectionEpoch += 1;
+      this.inboxReliable = false;
+      for (const cancel of this.pendingReliable) cancel();
       if (this.closed) return;
       this.presence.detach();
       this.setState('offline');
@@ -327,12 +539,16 @@ export class RoomDirectory {
   private async subscribe(client: MqttClient, identity: RoomIdentity, inbox: string): Promise<void> {
     const epoch = ++this.connectionEpoch;
     try {
-      const grants = await client.subscribeAsync([`${roomsPrefix}+`, inbox]);
+      const grants = await client.subscribeAsync({
+        [`${roomsPrefix}+`]: { qos: 0 },
+        [inbox]: { qos: 1, rap: true, rh: 2 },
+      });
       if (this.closed || !client.connected || epoch !== this.connectionEpoch) return;
       if (grants.length !== 2 || grants.some((grant) => grant.qos > 2)) {
         this.setState('offline');
         return;
       }
+      this.inboxReliable = grants.some((grant) => grant.topic === inbox && grant.qos === 1);
       await this.presence.attach(client, identity);
       if (this.closed || !client.connected || epoch !== this.connectionEpoch) return;
       this.setState('online');
@@ -414,21 +630,49 @@ export class RoomDirectory {
     const envelope = parse(text);
     if (!own || !privateKey || !isEnvelope(envelope) || envelope.sender.id === own.id) return;
 
+    if (envelope.relay) {
+      await this.receiveRelay(envelope, own, epoch);
+      return;
+    }
+
     let signal: unknown;
     try {
       const key = await sharedKey(privateKey, envelope.sender);
-      const plaintext = await crypto.subtle.decrypt(
-        cipherParams(envelope.sender, own, fromHex(envelope.iv)),
-        key,
-        decodeBytes(envelope.data),
-      );
-      signal = parse(decoder.decode(plaintext));
+      signal = await decryptEnvelope(envelope, own, key);
     } catch {
       return;
     }
 
     if (this.onlineClient() && epoch === this.connectionEpoch && isSignal(signal)) {
       this.callbacks.onSignal(envelope.sender, signal);
+    }
+  }
+
+  private async receiveRelay(envelope: Envelope, own: RoomIdentity, epoch: number): Promise<void> {
+    const relay = this.relay;
+    if (
+      !relay ||
+      envelope.sender.id !== relay.target.id ||
+      envelope.sender.key !== relay.target.key ||
+      envelope.data.length > maxRelayEncodedBytes
+    )
+      return;
+
+    let message: unknown;
+    try {
+      message = await decryptEnvelope(envelope, own, relay.key, relay.context);
+    } catch {
+      return;
+    }
+
+    if (
+      this.onlineClient() &&
+      epoch === this.connectionEpoch &&
+      this.relay === relay &&
+      isRelayData(message) &&
+      sameContext(message, relay.context)
+    ) {
+      relay.onPacket({ sequence: message.sequence, payload: message.payload });
     }
   }
 
